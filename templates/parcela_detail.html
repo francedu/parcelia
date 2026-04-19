@@ -1,0 +1,126 @@
+{% extends 'base.html' %}
+{% block title %}Ficha de la parcela{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h1 class="h3 mb-0">{{ parcela['nombre'] }}</h1>
+    <div class="text-muted">{{ parcela['curso'] or 'Sin referencia' }} · Gasto común {{ formato_monto(parcela['cuota_mensual']) }}</div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <form class="d-flex gap-2" method="get">
+      <input class="form-control" type="month" name="mes" value="{{ resumen['mes'] }}">
+      <button class="btn btn-outline-secondary">Ver mes</button>
+    </form>
+    {% if current_user.can_edit() %}<a class="btn btn-outline-primary" href="{{ url_for('parcelas_edit', parcela_id=parcela['id']) }}">Editar parcela</a>{% endif %}
+  </div>
+</div>
+
+<ul class="nav nav-tabs mb-3" id="parcelaTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="resumen-tab" data-bs-toggle="tab" data-bs-target="#resumen-pane" type="button" role="tab">Resumen financiero</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="ficha-tab" data-bs-toggle="tab" data-bs-target="#ficha-pane" type="button" role="tab">Ficha de la parcela</button>
+  </li>
+</ul>
+
+<div class="tab-content" id="parcelaTabsContent">
+  <div class="tab-pane fade show active" id="resumen-pane" role="tabpanel" aria-labelledby="resumen-tab">
+    <div class="row g-3 mb-3">
+      <div class="col-md-3"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Pagado en {{ resumen['mes'] }}</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen['pagado_mes']) }}</div><div class="text-muted">{{ resumen['pagos_mes'] }} pago(s)</div></div></div></div>
+      <div class="col-md-3"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Deuda del mes</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen['deuda_mes']) }}</div><div class="text-muted">Gasto común pendiente actual</div></div></div></div>
+      <div class="col-md-3"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Ingresos asociados</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen['ingresos_actividad']) }}</div><div class="text-muted">Ingresos vinculados a la parcela</div></div></div></div>
+      <div class="col-md-3"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Movimientos asociados</div><div class="fs-4 fw-semibold">{{ resumen['movimientos_asociados'] }}</div><div class="text-muted">Ingresos y egresos relacionados</div></div></div></div>
+    </div>
+
+    <div class="card shadow-sm mb-3">
+      <div class="card-header bg-white"><h2 class="h5 mb-0">Resumen por categoría</h2></div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-hover mb-0 align-middle">
+            <thead><tr><th>Actividad</th><th class="text-end">Ingresos</th><th class="text-end">Egresos</th><th class="text-end">Balance</th><th class="text-center">Movs.</th></tr></thead>
+            <tbody>
+              {% for row in actividad_resumen %}
+              <tr>
+                <td>{% if row['actividad_id'] %}<a href="{{ url_for('actividad_detail', actividad_id=row['actividad_id']) }}">{{ row['actividad'] }}</a>{% else %}{{ row['actividad'] }}{% endif %}</td>
+                <td class="text-end">{{ formato_monto(row['ingresos']) }}</td>
+                <td class="text-end">{{ formato_monto(row['egresos']) }}</td>
+                <td class="text-end">{{ formato_monto((row['ingresos'] or 0) - (row['egresos'] or 0)) }}</td>
+                <td class="text-center">{{ row['movimientos'] }}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="5" class="text-center text-muted py-4">Esta parcela no tiene movimientos asociados a categorías.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-header bg-white"><h2 class="h5 mb-0">Historial completo</h2></div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-striped mb-0 align-middle">
+            <thead><tr><th>Fecha</th><th>Mes</th><th>Tipo</th><th>Actividad</th><th>Observación</th><th class="text-end">Monto</th></tr></thead>
+            <tbody>
+            {% for row in historial %}
+              <tr>
+                <td>{{ row['fecha'] }}</td>
+                <td>{{ row['mes'] }}</td>
+                <td>{{ row['tipo'] }}</td>
+                <td>{{ row['actividad'] or '-' }}</td>
+                <td>{{ row['observacion'] or '-' }}</td>
+                <td class="text-end">{{ formato_monto(row['monto']) }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6" class="text-center text-muted py-4">Sin historial registrado.</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-pane fade" id="ficha-pane" role="tabpanel" aria-labelledby="ficha-tab">
+    <div class="card shadow-sm">
+      <div class="card-header bg-white"><h2 class="h5 mb-0">Datos de contacto y observaciones</h2></div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <div class="border rounded p-3 h-100">
+              <div class="text-muted small mb-1">Propietario / responsable</div>
+              <div class="fw-semibold">{{ ficha['propietario'] or 'Sin propietario registrado' }}</div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="border rounded p-3 h-100">
+              <div class="text-muted small mb-1">Teléfono</div>
+              <div class="fw-semibold">{{ ficha['telefono'] or 'Sin propietario registrado' }}</div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="border rounded p-3 h-100">
+              <div class="text-muted small mb-1">Estado</div>
+              <div class="fw-semibold">{{ 'Activo' if parcela['activo'] else 'Inactivo' }}</div>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="border rounded p-3">
+              <div class="text-muted small mb-1">Dirección</div>
+              <div class="fw-semibold">{{ ficha['direccion'] or 'Sin propietario registrado' }}</div>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="border rounded p-3">
+              <div class="text-muted small mb-1">Observaciones</div>
+              <div style="white-space: pre-wrap;">{{ ficha['observacion_ficha'] or 'Sin observaciones.' }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

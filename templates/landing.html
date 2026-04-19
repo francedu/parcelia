@@ -1,0 +1,205 @@
+{% extends 'base.html' %}
+{% block title %}Parcelia | Administración de parcelas en condominios{% endblock %}
+{% block content %}
+<section class="home-shell">
+  <header class="home-topbar">
+    <a class="home-brand" href="{{ url_for('landing') }}">
+      <span class="home-brand-badge">▣</span>
+      <span class="home-brand-text">
+        <strong>Parcelia</strong>
+        <small>Administración simple para parcelas en condominios</small>
+      </span>
+    </a>
+
+    <nav class="home-menu" aria-label="Navegación principal">
+      <a href="#funciones">Funciones</a>
+      <a href="#como-funciona">Cómo funciona</a>
+      <a href="#plataforma">Plataforma</a>
+      <a href="#contacto">Contacto</a>
+    </nav>
+
+    <div class="home-actions">
+      <a class="btn btn-outline-secondary home-btn-ghost" href="{{ url_for('login') }}">Acceso clientes</a>
+      <a class="btn btn-primary home-btn-main" href="{{ url_for('demo_login') }}">Probar demo</a>
+    </div>
+  </header>
+
+  <section class="home-hero" id="inicio">
+    <div class="home-hero-copy">
+      <span class="home-kicker">Software para administrar parcelas en condominios</span>
+      <h1 class="home-hero-title">Gestiona tus parcelas en condominios con Parcelia.</h1>
+      <p class="home-hero-lead">Controla pagos, propietarios, comunicaciones y reportes desde una sola plataforma, con información ordenada por comunidad.</p>
+      <div class="home-hero-cta">
+        <a class="btn btn-primary btn-lg" href="{{ url_for('demo_login') }}">Entrar a la demo</a>
+        <a class="btn btn-outline-secondary btn-lg" href="#plataforma">Ver plataforma</a>
+      </div>
+      <div class="home-proof-row">
+        <div><strong>Cobranza clara</strong><span>Cuotas, pagos y morosidad por parcela.</span></div>
+        <div><strong>Operación centralizada</strong><span>Propietarios, actas y gastos en un mismo lugar.</span></div>
+        <div><strong>Reportes útiles</strong><span>Visibilidad rápida para administración y comité.</span></div>
+      </div>
+      <div class="demo-access-card">
+        <div>
+          <strong>Demo lista para probar</strong>
+          <span>Ingresa con un condominio de ejemplo, parcelas cargadas y movimientos reales de varios meses.</span>
+        </div>
+        <div class="demo-access-actions">
+          <code>demo@parcelia.cl / 123456</code>
+          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('demo_login') }}">Abrir demo</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="home-hero-visual">
+      <div class="home-dashboard-card">
+        <div class="home-dashboard-head">
+          <span>Vista general del sistema</span>
+          <strong>Panel principal</strong>
+        </div>
+        <img src="{{ url_for('static', filename='img/landing-dashboard-real.png') }}" alt="Panel principal de Parcelia" class="home-dashboard-image">
+      </div>
+      <div class="home-floating-strip">
+        <article>
+          <strong>Pagos y cuotas</strong>
+          <span>Seguimiento simple del estado de cada parcela y comunidad.</span>
+        </article>
+        <article>
+          <strong>Reportes y control</strong>
+          <span>Información lista para revisar sin planillas dispersas.</span>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="home-section" id="funciones">
+    <div class="home-section-head">
+      <div>
+        <span class="section-label">Funciones clave</span>
+        <h2>Todo lo necesario para administrar parcelas sin desorden</h2>
+      </div>
+      <p>Parcelia centraliza cobranza, gastos, propietarios, actas y reportes por condominio para que operes con más control y menos fricción.</p>
+    </div>
+    <div class="home-feature-grid">
+      {% for item in caracteristicas %}
+      <article class="home-feature-card">
+        <div class="home-feature-icon">{{ item.icono }}</div>
+        <h3>{{ item.titulo }}</h3>
+        <p>{{ item.texto }}</p>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="home-section" id="como-funciona">
+    <div class="home-section-head">
+      <div>
+        <span class="section-label">Cómo funciona</span>
+        <h2>Empieza rápido y administra con una sola herramienta</h2>
+      </div>
+      <p>La experiencia está pensada para que la administración encuentre lo importante en pocos pasos y sin accesos innecesarios.</p>
+    </div>
+    <div class="home-steps-grid">
+      <article class="home-step-card">
+        <span class="home-step-number">01</span>
+        <h3>Configura tu comunidad</h3>
+        <p>Crea el condominio, define usuarios y organiza la información base de las parcelas.</p>
+      </article>
+      <article class="home-step-card">
+        <span class="home-step-number">02</span>
+        <h3>Gestiona pagos y propietarios</h3>
+        <p>Registra cuotas, pagos, gastos y datos de contacto desde un mismo panel.</p>
+      </article>
+      <article class="home-step-card">
+        <span class="home-step-number">03</span>
+        <h3>Revisa reportes y seguimiento</h3>
+        <p>Consulta estado financiero, morosidad y acuerdos para tomar decisiones con más claridad.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="home-section home-platform-grid" id="plataforma">
+    <article class="home-panel-card">
+      <div class="home-panel-copy">
+        <span class="section-label">Plataforma</span>
+        <h2>Un dashboard pensado para la administración de parcelas</h2>
+        <p>Visualiza rápidamente el estado del condominio y accede a la información crítica sin recorrer módulos innecesarios.</p>
+        <ul class="home-check-list">
+          <li>Resumen financiero y morosidad del período</li>
+          <li>Accesos directos a tareas operativas frecuentes</li>
+          <li>Vista clara para seguimiento administrativo</li>
+        </ul>
+      </div>
+      <div class="home-shot-wrap">
+        <img src="{{ url_for('static', filename='img/landing-dashboard-real.png') }}" alt="Dashboard de Parcelia" class="home-shot-image">
+      </div>
+    </article>
+
+    <article class="home-panel-card home-panel-card-soft">
+      <div class="home-panel-copy">
+        <span class="section-label">Beneficios</span>
+        <h2>Más orden operativo y mejor control por comunidad</h2>
+        <div class="home-benefit-grid">
+          <div><strong>Menos tareas dispersas</strong><span>La información queda centralizada por condominio.</span></div>
+          <div><strong>Mejor seguimiento</strong><span>Pagos, gastos y actividades con trazabilidad clara.</span></div>
+          <div><strong>Comunicación más simple</strong><span>Soporte para informar a comité y propietarios.</span></div>
+          <div><strong>Escalabilidad real</strong><span>Preparado para operar uno o varios condominios.</span></div>
+        </div>
+      </div>
+      <div class="home-shot-wrap">
+        <img src="{{ url_for('static', filename='img/landing-reporte-real.png') }}" alt="Reporte mensual de Parcelia" class="home-shot-image">
+      </div>
+    </article>
+  </section>
+
+  <section class="home-section home-contact-grid" id="contacto">
+    <article class="home-contact-card">
+      <span class="section-label">Contacto</span>
+      <h2>Conoce cómo aplicar Parcelia en tu condominio</h2>
+      <p>Te mostramos el sistema y cómo adaptarlo a la operación de tu comunidad de parcelas.</p>
+      <div class="home-contact-list">
+        <div><strong>Teléfono principal</strong><span>{{ landing_contacto.telefono_principal }}</span></div>
+        <div><strong>Teléfono oficina</strong><span>{{ landing_contacto.telefono_secundario }}</span></div>
+        <div><strong>Correo</strong><span>{{ landing_contacto.email }}</span></div>
+        <div><strong>Horario</strong><span>{{ landing_contacto.horario }}</span></div>
+      </div>
+      <div class="home-contact-actions">
+        <a class="btn btn-outline-secondary" href="mailto:{{ landing_contacto.email }}">Enviar correo</a>
+        <a class="btn btn-primary" href="{{ landing_contacto.whatsapp_url }}" target="_blank" rel="noopener">WhatsApp</a>
+      </div>
+    </article>
+
+    <article class="home-form-card" id="solicitud">
+      <span class="section-label">Agenda una reunión</span>
+      <h3>Hablemos de tu condominio</h3>
+      <p class="form-helper">Déjanos tus datos y coordinamos una llamada breve para mostrarte cómo Parcelia puede ayudarte a ordenar la administración de tu condominio.</p>
+      <form method="post" action="{{ url_for('solicitar_informacion') }}" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="col-md-6">
+          <label class="form-label">Nombre</label>
+          <input class="form-control" name="nombre" required placeholder="Tu nombre">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Correo</label>
+          <input class="form-control" type="email" name="email" required placeholder="tu@correo.cl">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Teléfono</label>
+          <input class="form-control" name="telefono" placeholder="+56 9 ...">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Condominio</label>
+          <input class="form-control" name="condominio" placeholder="Nombre de tu condominio">
+        </div>
+        <div class="col-12">
+          <label class="form-label">Mensaje</label>
+          <textarea class="form-control" name="mensaje" rows="5" required placeholder="Cuéntanos cuántas parcelas administran y qué quieren mejorar."></textarea>
+        </div>
+        <div class="col-12 d-flex flex-column flex-sm-row gap-3">
+          <button class="btn btn-primary btn-lg" type="submit">Solicitar contacto</button>
+          <a class="btn btn-outline-secondary btn-lg" href="{{ url_for('demo_login') }}">Ver demo activa</a>
+        </div>
+      </form>
+    </article>
+  </section>
+</section>
+{% endblock %}

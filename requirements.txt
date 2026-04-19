@@ -1,0 +1,6 @@
+Flask>=3.1,<4
+Flask-Login>=0.6.3,<1
+openpyxl>=3.1,<4
+reportlab>=4.0,<5
+psycopg2-binary>=2.9,<3
+gunicorn>=23,<24

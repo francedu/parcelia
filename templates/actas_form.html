@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+{% block title %}Acta{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">{{ 'Editar acta / minuta' if acta and acta['id'] else 'Nueva acta / minuta' }}</h1>
+<div class="card shadow-sm">
+  <div class="card-body">
+    <form method="post" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <div class="col-md-6"><label class="form-label">Título</label><input class="form-control" name="titulo" value="{{ acta['titulo'] if acta else '' }}" required></div>
+      <div class="col-md-3"><label class="form-label">Fecha</label><input type="date" class="form-control" name="fecha" value="{{ acta['fecha'] if acta else '' }}" required></div>
+      <div class="col-md-3"><label class="form-label">Estado</label><select class="form-select" name="estado">{% for e in estados %}<option value="{{ e }}" {% if acta and acta['estado']==e %}selected{% endif %}>{{ e.replace('_',' ')|title }}</option>{% endfor %}</select></div>
+      <div class="col-md-6"><label class="form-label">Lugar</label><input class="form-control" name="lugar" value="{{ acta['lugar'] if acta else '' }}"></div>
+      <div class="col-md-3"><label class="form-label">Hora inicio</label><input class="form-control" name="hora_inicio" value="{{ acta['hora_inicio'] if acta else '' }}" placeholder="12:15 hrs"></div>
+      <div class="col-md-3"><label class="form-label">Hora término</label><input class="form-control" name="hora_termino" value="{{ acta['hora_termino'] if acta else '' }}"></div>
+      <div class="col-12"><label class="form-label">Asistentes</label><textarea class="form-control" name="asistentes" rows="5" placeholder="Una línea por asistente">{{ acta['asistentes'] if acta else '' }}</textarea></div>
+      <div class="col-12"><label class="form-label">Temas de tabla</label><textarea class="form-control" name="temas" rows="4">{{ acta['temas'] if acta else '' }}</textarea></div>
+      <div class="col-12"><label class="form-label">Desarrollo</label><textarea class="form-control" name="desarrollo" rows="8">{{ acta['desarrollo'] if acta else '' }}</textarea></div>
+      <div class="col-md-6"><label class="form-label">Acuerdos</label><textarea class="form-control" name="acuerdos" rows="6">{{ acta['acuerdos'] if acta else '' }}</textarea></div>
+      <div class="col-md-6"><label class="form-label">Responsables y plazos</label><textarea class="form-control" name="responsables" rows="6">{{ acta['responsables'] if acta else '' }}</textarea></div>
+      <div class="col-12"><label class="form-label">Observaciones finales</label><textarea class="form-control" name="observaciones" rows="4">{{ acta['observaciones'] if acta else '' }}</textarea></div>
+      <div class="col-12 d-flex gap-2 flex-wrap">
+        <button class="btn btn-primary">Guardar</button>
+        <a class="btn btn-outline-secondary" href="{{ url_for('actas_list') }}">Cancelar</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

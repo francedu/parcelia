@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}Movimiento{% endblock %}
+{% block content %}
+<div class="form-shell mx-auto">
+  <div class="page-head mb-3">
+    <div class="page-eyebrow">Caja</div>
+    <h1 class="h3 mb-1">{{ 'Editar movimiento' if movimiento else 'Nuevo movimiento' }}</h1>
+    <div class="text-muted">Usa este formulario para registrar ingresos o gastos manuales.</div>
+  </div>
+  <div class="card shadow-sm form-card"><div class="card-body p-4"><form method="post" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ next_url or request.args.get('next', '') }}">
+    {% if current_user.is_global_admin() and request.args.get('condominio_id') %}<input type="hidden" name="condominio_id" value="{{ request.args.get('condominio_id') }}">{% endif %}
+    {% set selected_tipo = movimiento['tipo'] if movimiento else request.args.get('tipo', 'ingreso') %}
+    {% set selected_actividad = movimiento['actividad_id'] if movimiento else request.args.get('actividad_id', '')|int %}
+    {% set selected_parcela = movimiento['parcela_id'] if movimiento else (selected_parcela_id or request.args.get('parcela_id', ''))|int %}
+    <div class="col-md-3"><label class="form-label">Fecha</label><input class="form-control" type="date" name="fecha" value="{{ movimiento['fecha'] if movimiento else now.strftime('%Y-%m-%d') }}" required></div>
+    <div class="col-md-3"><label class="form-label">Tipo</label><select class="form-select" name="tipo"><option value="ingreso" {% if selected_tipo=='ingreso' %}selected{% endif %}>ingreso</option><option value="gasto" {% if selected_tipo=='gasto' %}selected{% endif %}>gasto</option></select></div>
+    <div class="col-md-3"><label class="form-label">Monto</label><div class="input-group"><span class="input-group-text">$</span><input class="form-control" name="monto" data-money-input inputmode="decimal" value="{{ movimiento['monto'] if movimiento else '' }}" required placeholder="0"></div></div>
+    <div class="col-md-3"><label class="form-label">Categoría</label><select class="form-select" name="actividad_id"><option value="">Sin categoría</option>{% for a in actividades %}<option value="{{ a['id'] }}" {% if (movimiento and movimiento['actividad_id']==a['id']) or (not movimiento and selected_actividad==a['id']) %}selected{% endif %}>{{ a['nombre'] }} ({{ a['fecha'] }})</option>{% endfor %}</select><div class="form-text">Si vienes desde una categoría, ya queda preseleccionada.</div></div>
+    <div class="col-md-6"><label class="form-label">Parcela relacionada (opcional)</label><select class="form-select" name="parcela_id"><option value="">Sin parcela asociada</option>{% for parcela in parcelas %}<option value="{{ parcela['id'] }}" {% if selected_parcela==parcela['id'] %}selected{% endif %}>{{ parcela['nombre'] }}{% if parcela['curso'] %} ({{ parcela['curso'] }}){% endif %}</option>{% endfor %}</select><div class="form-text">Úsalo cuando el ingreso o egreso corresponda a una parcela existente.</div></div>
+    <div class="col-md-6"><label class="form-label">Concepto</label><input class="form-control" name="concepto" value="{{ movimiento['concepto'] if movimiento else '' }}" required placeholder="Ej. Mantención portón, pago guardia, multa, arriendo sede"></div>
+    <div class="col-12"><label class="form-label">Observación</label><textarea class="form-control" name="observacion" rows="3" placeholder="Detalle adicional para dejar trazabilidad">{{ movimiento['observacion'] if movimiento else '' }}</textarea></div>
+    <div class="col-12 d-flex gap-2 flex-wrap pt-2"><button class="btn btn-primary">Guardar</button><a class="btn btn-outline-secondary" href="{{ next_url or request.args.get('next') or url_for('movimientos_list') }}">Cancelar</a></div>
+  </form></div></div>
+</div>
+{% endblock %}

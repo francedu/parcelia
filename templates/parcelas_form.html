@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block title %}Parcela{% endblock %}
+{% block content %}
+<div class="form-shell mx-auto">
+  <div class="page-head mb-3">
+    <div class="page-eyebrow">Ficha de parcela</div>
+    <h1 class="h3 mb-1">{{ 'Editar parcela' if parcela else 'Nueva parcela' }}</h1>
+    <div class="text-muted">Completa los datos principales de la parcela para ordenar cobranza, propietario y contacto.</div>
+  </div>
+  <div class="card shadow-sm form-card">
+    <div class="card-body p-4">
+      <form method="post" class="row g-3 needs-review">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="col-12">
+          <div class="section-label">Datos principales</div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Parcela / identificador</label>
+          <input class="form-control" name="nombre" value="{{ parcela['nombre'] if parcela else '' }}" required placeholder="Ej. Parcela 01">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Referencia / rol</label>
+          <input class="form-control" name="curso" value="{{ parcela['curso'] if parcela else '' }}" placeholder="Ej. Referencia A / Rol 125">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Gasto común mensual</label>
+          <div class="input-group"><span class="input-group-text">$</span><input class="form-control" name="cuota_mensual" value="{{ parcela['cuota_mensual'] if parcela else '' }}" data-money-input inputmode="decimal" placeholder="0"></div>
+          <div class="form-text">Ingresa solo números. Puedes usar punto o coma decimal.</div>
+        </div>
+
+        <div class="col-12 mt-2"><div class="section-label">Contacto</div></div>
+        <div class="col-md-6">
+          <label class="form-label">Propietario / responsable</label>
+          <input class="form-control" name="propietario" value="{{ parcela['propietario'] if parcela else '' }}" placeholder="Nombre del propietario o responsable">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Teléfono</label>
+          <input class="form-control" name="telefono" value="{{ parcela['telefono'] if parcela else '' }}" placeholder="Ej. +56 9...">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Dirección</label>
+          <input class="form-control" name="direccion" value="{{ parcela['direccion'] if parcela else '' }}" placeholder="Dirección o referencia">
+        </div>
+
+        <div class="col-12 mt-2"><div class="section-label">Observaciones</div></div>
+        <div class="col-12">
+          <label class="form-label">Notas relevantes</label>
+          <textarea class="form-control" name="observacion_ficha" rows="4" placeholder="Acuerdos de pago, datos de acceso, observaciones importantes">{{ parcela['observacion_ficha'] if parcela else '' }}</textarea>
+        </div>
+
+        <div class="col-12">
+          <div class="form-check form-switch mt-2">
+            <input class="form-check-input" type="checkbox" role="switch" name="activo" id="activoSwitch" {% if not parcela or parcela['activo'] %}checked{% endif %}>
+            <label class="form-check-label" for="activoSwitch">Parcela activa</label>
+          </div>
+        </div>
+
+        <div class="col-12 d-flex gap-2 flex-wrap pt-2">
+          <button class="btn btn-primary">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{{ url_for('parcelas_list') }}">Cancelar</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

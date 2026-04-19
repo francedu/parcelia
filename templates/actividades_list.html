@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block title %}Categorías{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h1 class="h3 mb-0">Categorías</h1>
+    <div class="text-muted">Resumen de ingresos y egresos por categoría.</div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a class="btn btn-outline-secondary" href="{{ url_for('actividades_report') }}">Reporte por categoría</a>
+    {% if current_user.can_edit() %}<a class="btn btn-primary" href="{{ url_for('actividades_new') }}">Nueva categoría</a>{% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Ingresos por categorías</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen_general['ingresos']) }}</div><div class="text-muted">Suma de todos los ingresos asociados</div></div></div></div>
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Egresos por categorías</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen_general['egresos']) }}</div><div class="text-muted">Suma de todos los gastos asociados</div></div></div></div>
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Balance total</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen_general['balance']) }}</div><div class="text-muted">{{ resumen_general['cantidad_actividades'] }} categoría(s)</div></div></div></div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead><tr><th>Nombre</th><th>Fecha</th><th>Descripción</th><th class="text-end">Ingresos</th><th class="text-end">Egresos</th><th class="text-end">Balance</th><th class="text-center">Movs.</th><th></th></tr></thead>
+        <tbody>
+        {% for a in actividades %}
+          <tr>
+            <td class="fw-semibold">{{ a['nombre'] }}</td>
+            <td>{{ a['fecha'] }}</td>
+            <td>{{ a['descripcion'] or '-' }}</td>
+            <td class="text-end">{{ formato_monto(a['ingresos']) }}</td>
+            <td class="text-end">{{ formato_monto(a['egresos']) }}</td>
+            <td class="text-end">{{ formato_monto((a['ingresos'] or 0) - (a['egresos'] or 0)) }}</td>
+            <td class="text-center">{{ a['cantidad_ingresos'] + a['cantidad_egresos'] }}</td>
+            <td class="text-end">
+              <div class="d-inline-flex gap-2 flex-wrap justify-content-end">
+                <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('actividad_detail', actividad_id=a['id']) }}">Ver detalle</a>
+                {% if current_user.can_edit() %}
+                <a class="btn btn-sm btn-outline-success" href="{{ url_for('movimientos_new', tipo='ingreso', actividad_id=a['id'], next=url_for('actividad_detail', actividad_id=a['id'])) }}">Nuevo ingreso</a>
+                <a class="btn btn-sm btn-outline-warning" href="{{ url_for('movimientos_new', tipo='gasto', actividad_id=a['id'], next=url_for('actividad_detail', actividad_id=a['id'])) }}">Nuevo egreso</a>
+                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('actividades_edit', actividad_id=a['id']) }}">Editar</a>
+                <form method="post" action="{{ url_for('actividades_delete', actividad_id=a['id']) }}" onsubmit="return confirm('¿Eliminar la actividad {{ a['nombre'] }}? Los movimientos quedarán sin categoría asociada.');">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                  <button class="btn btn-sm btn-outline-danger">Eliminar</button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="text-center text-muted py-4">Sin categorías.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

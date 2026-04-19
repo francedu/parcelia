@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block title %}Registrar pago{% endblock %}
+{% block content %}
+{% set selected_parcela = (pago['parcela_id'] if pago else request.args.get('parcela_id', ''))|string %}
+<div class="form-shell mx-auto">
+  <div class="page-head mb-3">
+    <div class="page-eyebrow">Cobros</div>
+    <h1 class="h3 mb-1">{{ 'Editar pago' if pago else 'Registrar pago o ingreso extraordinario' }}</h1>
+    <div class="text-muted">Registra el gasto común mensual o un ingreso extraordinario asociado a una categoría.</div>
+  </div>
+  <div class="card shadow-sm form-card"><div class="card-body p-4"><form method="post" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <div class="col-md-6"><label class="form-label">Parcela</label><select class="form-select" name="parcela_id" required><option value="">Selecciona</option>{% for parcela in parcelas %}<option value="{{ parcela['id'] }}" {% if selected_parcela==parcela['id']|string %}selected{% endif %}>{{ parcela['nombre'] }}{% if parcela['curso'] %} ({{ parcela['curso'] }}){% endif %}</option>{% endfor %}</select></div>
+    <div class="col-md-3"><label class="form-label">Fecha</label><input class="form-control" type="date" name="fecha" value="{{ pago['fecha'] if pago else now.strftime('%Y-%m-%d') }}" required></div>
+    <div class="col-md-3"><label class="form-label">Mes</label><input class="form-control" type="month" name="mes" value="{{ pago['mes'] if pago else now.strftime('%Y-%m') }}" required></div>
+    {% if not pago %}
+    <div class="col-md-4"><label class="form-label">Tipo</label><select class="form-select" name="tipo_pago" id="tipoPago"><option value="cuota_mensual">Pago de gasto común</option><option value="actividad_parcela">Ingreso extraordinario</option></select></div>
+    <div class="col-md-4"><label class="form-label">Monto</label><div class="input-group"><span class="input-group-text">$</span><input class="form-control" name="monto" data-money-input inputmode="decimal" required placeholder="0"></div></div>
+    <div class="col-md-4" id="actividadWrap"><label class="form-label">Categoría</label><select class="form-select" name="actividad_id"><option value="">Sin actividad</option>{% for a in actividades %}<option value="{{ a['id'] }}">{{ a['nombre'] }} ({{ a['fecha'] }})</option>{% endfor %}</select><div class="form-text">Solo se usa para ingresos extraordinarios clasificados.</div></div>
+    {% else %}
+    <div class="col-md-6"><label class="form-label">Monto</label><div class="input-group"><span class="input-group-text">$</span><input class="form-control" name="monto" data-money-input inputmode="decimal" value="{{ pago['monto'] }}" required></div></div>
+    <div class="col-md-6"><label class="form-label">Tipo</label><input class="form-control" value="Gasto común" disabled></div>
+    {% endif %}
+    <div class="col-12"><label class="form-label">Observación</label><textarea class="form-control" name="observacion" rows="3" placeholder="Ej. transferencia, efectivo, abono parcial, ingreso por multa">{{ pago['observacion'] if pago else '' }}</textarea></div>
+    <div class="col-12 d-flex gap-2 flex-wrap pt-2"><button class="btn btn-primary">Guardar</button><a class="btn btn-outline-secondary" href="{{ url_for('pagos_list') }}">Cancelar</a></div>
+  </form></div></div>
+</div>
+{% endblock %}
+{% block scripts %}{% if not pago %}<script>function toggleActividad(){const isAporte=document.getElementById('tipoPago').value==='actividad_parcela';document.getElementById('actividadWrap').style.display=isAporte?'block':'none';}document.getElementById('tipoPago').addEventListener('change',toggleActividad);toggleActividad();</script>{% endif %}{% endblock %}

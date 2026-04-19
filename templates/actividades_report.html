@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% block title %}Reporte por categoría{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h1 class="h3 mb-0">Reporte por categoría</h1>
+    <div class="text-muted">Resumen financiero por categoría y deuda total por parcela.</div>
+  </div>
+  <a class="btn btn-outline-secondary" href="{{ url_for('actividades_list') }}">Volver a categorías</a>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Categorías registradas</div><div class="fs-4 fw-semibold">{{ actividades|length }}</div></div></div></div>
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Deuda total parcelas</div><div class="fs-4 fw-semibold">{{ formato_monto(total_deuda) }}</div><div class="text-muted">Mes consultado: {{ mes }}</div></div></div></div>
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><form method="get" class="d-flex gap-2 align-items-end"><div class="flex-grow-1"><label class="form-label small text-muted mb-1">Mes deuda parcelas</label><input class="form-control" type="month" name="mes" value="{{ mes }}"></div><button class="btn btn-outline-primary">Actualizar</button></form></div></div></div>
+</div>
+
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white"><h2 class="h5 mb-0">Balance por categoría</h2></div>
+  <div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>Categoría</th><th>Fecha</th><th class="text-end">Ingresos</th><th class="text-end">Egresos</th><th class="text-end">Balance</th><th class="text-center">Movs.</th><th></th></tr></thead><tbody>
+  {% for row in actividades %}
+    <tr>
+      <td>{{ row['nombre'] }}</td><td>{{ row['fecha'] }}</td><td class="text-end">{{ formato_monto(row['ingresos']) }}</td><td class="text-end">{{ formato_monto(row['egresos']) }}</td><td class="text-end">{{ formato_monto((row['ingresos'] or 0) - (row['egresos'] or 0)) }}</td><td class="text-center">{{ row['movimientos'] }}</td><td class="text-end"><a class="btn btn-sm btn-outline-secondary" href="{{ url_for('actividad_detail', actividad_id=row['id']) }}">Ver</a></td>
+    </tr>
+  {% else %}<tr><td colspan="7" class="text-center text-muted py-4">Sin categorías registradas.</td></tr>{% endfor %}
+  </tbody></table></div></div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-header bg-white"><h2 class="h5 mb-0">Deudas totales por parcela</h2></div>
+  <div class="card-body p-0"><div class="table-responsive"><table class="table table-striped mb-0 align-middle"><thead><tr><th>Parcela</th><th>Referencia</th><th class="text-end">Gasto común</th><th class="text-end">Pagado</th><th class="text-end">Debe</th><th>Estado</th></tr></thead><tbody>
+  {% for fila in deudas %}
+    {% set debe = [fila['cuota_mensual'] - fila['pagado'], 0]|max %}
+    {% set estado = estado_cuota(fila['cuota_mensual'], fila['pagado']) %}
+    <tr>
+      <td><a href="{{ url_for('parcela_detail', parcela_id=fila['id'], mes=mes) }}">{{ fila['nombre'] }}</a></td><td>{{ fila['curso'] or '-' }}</td><td class="text-end">{{ formato_monto(fila['cuota_mensual']) }}</td><td class="text-end">{{ formato_monto(fila['pagado']) }}</td><td class="text-end">{{ formato_monto(debe) }}</td><td><span class="state-pill">{{ estado[1] }} {{ estado[0] }}</span></td>
+    </tr>
+  {% else %}<tr><td colspan="6" class="text-center text-muted py-4">Sin parcelas registradas.</td></tr>{% endfor %}
+  </tbody></table></div></div>
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}Condominio{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">{{ 'Editar condominio' if condominio else 'Nuevo condominio' }}</h1>
+<div class="card shadow-sm"><div class="card-body"><form method="post" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+  <div class="col-md-8"><label class="form-label">Nombre</label><input class="form-control" name="nombre" value="{{ condominio['nombre'] if condominio else '' }}" required></div>
+  <div class="col-md-4 form-check ms-2 mt-5"><input class="form-check-input" type="checkbox" name="activo" {% if not condominio or condominio['activo'] %}checked{% endif %}><label class="form-check-label">Condominio activo</label></div>
+  <div class="col-12"><label class="form-label">Dirección</label><input class="form-control" name="direccion" value="{{ condominio['direccion'] if condominio else '' }}"></div>
+  <div class="col-12 d-flex gap-2"><button class="btn btn-primary">Guardar</button><a class="btn btn-outline-secondary" href="{{ url_for('condominios_list') }}">Cancelar</a></div>
+</form></div></div>
+{% endblock %}

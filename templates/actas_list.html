@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+{% block title %}Actas y minutas{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h1 class="h3 mb-0">Actas y minutas</h1>
+    <p class="text-muted mb-0">Registra, edita, duplica y exporta las reuniones del condominio.</p>
+  </div>
+  {% if current_user.can_manage_actas() %}
+  <a class="btn btn-primary" href="{{ url_for('actas_new') }}">Nueva acta</a>
+  {% endif %}
+</div>
+<form class="card shadow-sm mb-3">
+  <div class="card-body row g-3 align-items-end">
+    <div class="col-md-6">
+      <label class="form-label">Buscar</label>
+      <input class="form-control" name="q" value="{{ q }}" placeholder="Título, lugar o tema">
+    </div>
+    <div class="col-md-3 d-grid"><button class="btn btn-outline-secondary">Filtrar</button></div>
+    <div class="col-md-3 d-grid"><a class="btn btn-light" href="{{ url_for('actas_list') }}">Limpiar</a></div>
+  </div>
+</form>
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead><tr><th>Fecha</th><th>Título</th><th>Lugar</th><th>Estado</th><th>Actualizada</th><th></th></tr></thead>
+        <tbody>
+        {% for a in actas %}
+          <tr>
+            <td>{{ a['fecha'] }}</td>
+            <td>
+              <div class="fw-semibold">{{ a['titulo'] }}</div>
+              <small class="text-muted">{{ a['hora_inicio'] or 'Sin hora' }}</small>
+            </td>
+            <td>{{ a['lugar'] or '-' }}</td>
+            <td><span class="badge text-bg-{% if a['estado']=='aprobada' %}success{% elif a['estado']=='en_revision' %}warning{% else %}secondary{% endif %}">{{ a['estado'].replace('_', ' ') }}</span></td>
+            <td>{{ a['updated_at'] or '-' }}</td>
+            <td class="text-end">
+              <div class="d-inline-flex gap-2 flex-wrap justify-content-end">
+                <a class="btn btn-sm btn-outline-dark" href="{{ url_for('actas_pdf', acta_id=a['id']) }}">PDF</a>
+                {% if current_user.can_manage_actas() %}
+                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('actas_edit', acta_id=a['id']) }}">Editar</a>
+                <form method="post" action="{{ url_for('actas_duplicate', acta_id=a['id']) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                  <button class="btn btn-sm btn-outline-success">Duplicar mes</button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="text-center py-4 text-muted">Aún no hay actas registradas.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block title %}Respaldos{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Respaldos de base de datos</h1>
+  <form method="post" action="{{ url_for('backups_create') }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <button class="btn btn-primary">Crear respaldo ahora</button>
+  </form>
+</div>
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead><tr><th>Archivo</th><th>Fecha</th><th class="text-end">Tamaño</th><th></th></tr></thead>
+        <tbody>
+          {% for b in backups %}
+          <tr>
+            <td>{{ b['nombre'] }}</td>
+            <td>{{ b['modificado'].strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td class="text-end">{{ '%.1f KB'|format(b['tamano']/1024) }}</td>
+            <td class="text-end"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('backups_download', nombre=b['nombre']) }}">Descargar</a></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="text-center text-muted py-4">Aún no hay respaldos.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

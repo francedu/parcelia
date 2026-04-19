@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block title %}Reporte mensual{% endblock %}
+{% block content %}
+<div class="page-head d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <div class="page-eyebrow">Análisis mensual</div>
+    <h1 class="h3 mb-1">Reporte ejecutivo del mes</h1>
+    <div class="text-muted">Resumen de caja, cobranza, morosidad y principales egresos.</div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a class="btn btn-outline-secondary" href="{{ url_for('reportes_mensual_export', fmt='csv', mes=mes) }}">CSV</a>
+    <a class="btn btn-outline-success" href="{{ url_for('reportes_mensual_export', fmt='xlsx', mes=mes) }}">Excel</a>
+    <a class="btn btn-outline-danger" href="{{ url_for('reportes_mensual_export', fmt='pdf', mes=mes) }}">PDF</a>
+  </div>
+</div>
+<form class="row g-2 mb-3 align-items-end">
+  <div class="col-md-3"><label class="form-label">Mes</label><input class="form-control" type="month" name="mes" value="{{ mes }}"></div>
+  <div class="col-md-2 d-grid"><button class="btn btn-primary">Actualizar</button></div>
+</form>
+<div class="row g-3 mb-4">
+  <div class="col-md-6 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Ingresos</span><span class="metric-icon">💸</span></div><div class="metric-value metric-value-sm">{{ formato_monto(reporte['ingresos']) }}</div><div class="metric-foot">Pagos y otros ingresos del mes</div></div></div>
+  <div class="col-md-6 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Gastos</span><span class="metric-icon">🧾</span></div><div class="metric-value metric-value-sm">{{ formato_monto(reporte['gastos']) }}</div><div class="metric-foot">Egresos registrados en {{ mes }}</div></div></div>
+  <div class="col-md-6 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Balance</span><span class="metric-icon">⚖️</span></div><div class="metric-value metric-value-sm">{{ formato_monto(reporte['balance']) }}</div><div class="metric-foot">Diferencia entre ingresos y gastos</div></div></div>
+  <div class="col-md-6 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Cumplimiento</span><span class="metric-icon">📈</span></div><div class="metric-value metric-value-sm">{{ reporte['cumplimiento'] }}%</div><div class="metric-foot">{{ reporte['morosos']|length }} parcelas con deuda</div></div></div>
+</div>
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card shadow-sm dashboard-card mb-4"><div class="card-body">
+      <div class="section-head mb-3"><div><h2 class="h5 mb-1">Cobranza del mes</h2><p class="text-muted small mb-0">Gasto común esperado versus pago registrado.</p></div><div class="chip-stat">{{ mes }}</div></div>
+      <div class="progress dashboard-progress mb-2"><div class="progress-bar" style="width: {{ reporte['cumplimiento'] }}%"></div></div>
+      <div class="d-flex justify-content-between small text-muted mb-3"><span>Esperado: {{ formato_monto(reporte['total_esperado']) }}</span><span>Pagado: {{ formato_monto(reporte['total_pagado']) }}</span><span>Pendiente: {{ formato_monto(reporte['total_pendiente']) }}</span></div>
+      {% if reporte['ciclo'] %}<div class="alert alert-success mb-0">Ciclo de cobranza generado por <strong>{{ reporte['ciclo']['generado_por'] }}</strong> el {{ reporte['ciclo']['generado_en'] }}.</div>{% else %}<div class="alert alert-warning mb-0">Aún no hay ciclo mensual generado para {{ mes }}.</div>{% endif %}
+    </div></div>
+    <div class="card shadow-sm dashboard-card"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>Parcela</th><th>Sector</th><th class="text-end">Gasto común</th><th class="text-end">Pagado</th><th class="text-end">Pendiente</th><th>Estado</th></tr></thead><tbody>
+      {% for fila in reporte['cuotas'] %}<tr><td><a class="fw-semibold text-decoration-none" href="{{ url_for('parcela_detail', parcela_id=fila['id']) }}">{{ fila['nombre'] }}</a></td><td>{{ fila['curso'] or '-' }}</td><td class="text-end">{{ formato_monto(fila['cuota_mensual']) }}</td><td class="text-end">{{ formato_monto(fila['pagado']) }}</td><td class="text-end">{{ formato_monto(fila['pendiente']) }}</td><td><span class="state-pill">{{ fila['estado'] }}</span></td></tr>{% endfor %}
+    </tbody></table></div></div></div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card shadow-sm dashboard-card mb-4"><div class="card-body"><div class="section-head mb-3"><div><h2 class="h5 mb-1">Morosos del mes</h2><p class="text-muted small mb-0">Parcelas con saldo pendiente.</p></div></div>{% if reporte['morosos'] %}<div class="alert-stack">{% for fila in reporte['morosos'][:8] %}<a class="alert-item" href="{{ url_for('parcela_detail', parcela_id=fila['id']) }}"><div><div class="fw-semibold">{{ fila['nombre'] }}</div><div class="small text-muted">{{ fila['curso'] or 'Sin sector' }}</div></div><div class="text-end"><div class="fw-semibold text-danger">{{ formato_monto(fila['pendiente']) }}</div><div class="small text-muted">{{ fila['estado'] }}</div></div></a>{% endfor %}</div>{% else %}<div class="empty-state success-state"><div class="empty-icon">✅</div><div><div class="fw-semibold">Sin morosidad</div><div class="text-muted small">Todas las parcelas activas están al día.</div></div></div>{% endif %}</div></div>
+    <div class="card shadow-sm dashboard-card"><div class="card-body"><div class="section-head mb-3"><div><h2 class="h5 mb-1">Gastos principales</h2><p class="text-muted small mb-0">Categorías con más egreso en el mes.</p></div></div>{% if reporte['top_gastos'] %}<div class="summary-panel">{% for row in reporte['top_gastos'] %}<div class="summary-row"><span>{{ row['categoria'] }}</span><strong>{{ formato_monto(row['total']) }}</strong></div>{% endfor %}</div>{% else %}<div class="text-muted">No hay egresos cargados para este mes.</div>{% endif %}</div></div>
+  </div>
+</div>
+{% endblock %}

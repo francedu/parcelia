@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block title %}Condominios{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Condominios</h1>
+  <a class="btn btn-primary" href="{{ url_for('condominios_new') }}">Nuevo condominio</a>
+</div>
+<div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive">
+<table class="table table-hover mb-0 align-middle">
+  <thead><tr><th>Nombre</th><th>Dirección</th><th>Usuarios</th><th>Parcelas</th><th>Activo</th><th></th></tr></thead>
+  <tbody>
+    {% for c in condominios %}
+    <tr>
+      <td>{{ c['nombre'] }}</td>
+      <td>{{ c['direccion'] or '-' }}</td>
+      <td>{{ c['usuarios'] }}</td>
+      <td>{{ c['parcelas'] }}</td>
+      <td>{{ 'Sí' if c['activo'] else 'No' }}</td>
+      <td class="text-end"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('condominios_edit', condominio_id=c['id']) }}">Editar</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div></div></div>
+{% endblock %}

@@ -1,0 +1,243 @@
+{% extends 'base.html' %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="dashboard-hero mb-4">
+  <div>
+    <div class="hero-badge">Vista general</div>
+    <div class="eyebrow text-white-50">Panel principal</div>
+    <h1 class="dashboard-title">Resumen financiero{% if current_condominio %} · {{ current_condominio['nombre'] }}{% else %} del condominio{% endif %}</h1>
+    <p class="dashboard-subtitle mb-0">Controla ingresos, egresos, morosidad de gasto común y actividad reciente del condominio activo en esta vista.</p>
+  </div>
+  <form method="get" class="month-filter-card">
+    <label for="mes" class="form-label small text-muted mb-1">Mes analizado</label>
+    <div class="d-flex gap-2 align-items-center">
+      <input id="mes" name="mes" type="month" value="{{ mes }}" class="form-control">
+      <button class="btn btn-primary">Actualizar</button>
+    </div>
+  </form>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6 col-xl-3">
+    <div class="metric-card metric-balance">
+      <div class="metric-top"><span>Balance total</span><span class="metric-icon">💰</span></div>
+      <div class="metric-value">{{ formato_monto(dashboard_stats['balance_total']) }}</div>
+      <div class="metric-foot">Ingresos acumulados {{ formato_monto(resumen['ingresos']) }} · Gastos {{ formato_monto(resumen['gastos']) }}</div>
+    </div>
+  </div>
+  <div class="col-md-6 col-xl-3">
+    <div class="metric-card metric-month">
+      <div class="metric-top"><span>Balance del mes</span><span class="metric-icon">📆</span></div>
+      <div class="metric-value">{{ formato_monto(dashboard_stats['balance_mes']) }}</div>
+      <div class="metric-foot">{{ dashboard_stats['movimientos_mes'] }} movimientos · {{ mes }}</div>
+    </div>
+  </div>
+  <div class="col-md-6 col-xl-3">
+    <div class="metric-card metric-debt">
+      <div class="metric-top"><span>Morosidad del mes</span><span class="metric-icon">⚠️</span></div>
+      <div class="metric-value">{{ formato_monto(dashboard_stats['deuda_total']) }}</div>
+      <div class="metric-foot">{{ alertas|length }} parcelas con saldo pendiente</div>
+    </div>
+  </div>
+  <div class="col-md-6 col-xl-3">
+    <div class="metric-card metric-students">
+      <div class="metric-top"><span>Parcelas activas</span><span class="metric-icon">🏘️</span></div>
+      <div class="metric-value">{{ dashboard_stats['parcelas_activos'] }}</div>
+      <div class="metric-foot">🟢 {{ dashboard_stats['parcelas_pagados'] }} · 🟡 {{ dashboard_stats['parcelas_parciales'] }} · 🔴 {{ dashboard_stats['parcelas_deuda'] }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-8">
+    <div class="card shadow-sm dashboard-card h-100">
+      <div class="card-body">
+        <div class="section-head mb-3">
+          <div>
+            <h2 class="h5 mb-1">Ingresos vs gastos por mes</h2>
+            <p class="text-muted small mb-0">Tendencia acumulada para detectar meses con más presión de caja.</p>
+          </div>
+          <div class="chip-stat">Último mes: {{ dashboard_stats['ultimo_mes']['mes'] }}</div>
+        </div>
+        <canvas id="chartMensual" height="110"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card shadow-sm dashboard-card h-100">
+      <div class="card-body">
+        <div class="section-head mb-3">
+          <div>
+            <h2 class="h5 mb-1">Acciones rápidas</h2>
+            <p class="text-muted small mb-0">Atajos para registrar lo más frecuente.</p>
+          </div>
+        </div>
+        <div class="quick-actions-grid">
+          {% for action in quick_actions %}
+          <a class="quick-action" href="{{ action['href'] }}">
+            <div class="quick-icon">{{ action['icon'] }}</div>
+            <div>
+              <div class="fw-semibold">{{ action['label'] }}</div>
+              <div class="small text-muted">{{ action['hint'] }}</div>
+            </div>
+          </a>
+          {% endfor %}
+        </div>
+        <hr>
+        <div class="section-head mb-2">
+          <div>
+            <h2 class="h6 mb-1">Cumplimiento gasto común</h2>
+            <p class="text-muted small mb-0">Avance de cobro del gasto común del mes seleccionado.</p>
+          </div>
+          <strong>{{ dashboard_stats['cumplimiento'] }}%</strong>
+        </div>
+        <div class="progress dashboard-progress mb-2" role="progressbar" aria-valuenow="{{ dashboard_stats['cumplimiento'] }}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar" style="width: {{ dashboard_stats['cumplimiento'] }}%"></div>
+        </div>
+        <div class="d-flex justify-content-between small text-muted">
+          <span>Pagado {{ formato_monto(dashboard_stats['total_pagado']) }}</span>
+          <span>Esperado {{ formato_monto(dashboard_stats['total_esperado']) }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-xl-4">
+    <div class="card shadow-sm dashboard-card h-100">
+      <div class="card-body">
+        <div class="section-head mb-3">
+          <div>
+            <h2 class="h5 mb-1">Alertas de morosidad</h2>
+            <p class="text-muted small mb-0">Prioriza seguimiento a quienes siguen con deuda.</p>
+          </div>
+          <a href="{{ url_for('cuotas_view', mes=mes) }}" class="btn btn-sm btn-outline-secondary">Ver estado</a>
+        </div>
+        {% if alertas %}
+        <div class="alert-stack">
+          {% for alerta in alertas[:6] %}
+          <a class="alert-item" href="{{ url_for('parcela_detail', parcela_id=alerta['parcela_id']) }}">
+            <div>
+              <div class="fw-semibold">{{ alerta['icono'] }} {{ alerta['nombre'] }}</div>
+              <div class="small text-muted">{{ alerta['curso'] or 'Sin referencia' }} · {{ alerta['estado'] }}</div>
+            </div>
+            <strong>{{ formato_monto(alerta['debe']) }}</strong>
+          </a>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state success-state">
+          <div class="empty-icon">✅</div>
+          <div>
+            <div class="fw-semibold">Sin alertas este mes</div>
+            <div class="small text-muted">Todas las parcelas activas están al día.</div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl-5">
+    <div class="card shadow-sm dashboard-card h-100">
+      <div class="card-body">
+        <div class="section-head mb-3">
+          <div>
+            <h2 class="h5 mb-1">Últimos movimientos</h2>
+            <p class="text-muted small mb-0">Lo más reciente que impactó caja.</p>
+          </div>
+          <a href="{{ url_for('movimientos_list') }}" class="btn btn-sm btn-outline-secondary">Ver todos</a>
+        </div>
+        <div class="movement-list">
+          {% for row in ultimos %}
+          <div class="movement-item">
+            <div class="movement-type {{ 'income' if row['tipo']=='ingreso' else 'expense' }}">{{ 'Ingreso' if row['tipo']=='ingreso' else 'Gasto' }}</div>
+            <div class="movement-main">
+              <div class="fw-semibold">{{ row['concepto'] }}</div>
+              <div class="small text-muted">{{ row['fecha'] }} · {{ row['actividad'] }}</div>
+            </div>
+            <div class="movement-amount {{ 'text-success' if row['tipo']=='ingreso' else 'text-danger' }}">{{ formato_monto(row['monto']) }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl-3">
+    <div class="card shadow-sm dashboard-card h-100">
+      <div class="card-body">
+        <div class="page-photo-panel mb-3">
+          <div class="page-photo-copy">
+            <div class="hero-badge mb-2">Acceso principal</div>
+            <h3>Condominio activo</h3>
+            <p>{% if current_condominio %}Actualmente estás gestionando {{ current_condominio['nombre'] }}.{% else %}Selecciona un condominio para ver su información consolidada.{% endif %}</p>
+          </div>
+        </div>
+        <div class="section-head mb-3">
+          <div>
+            <h2 class="h5 mb-1">Resumen del mes</h2>
+            <p class="text-muted small mb-0">Vista rápida para toma de decisiones.</p>
+          </div>
+        </div>
+        <div class="summary-panel">
+          <div class="summary-row"><span>Ingresos del mes</span><strong>{{ formato_monto(dashboard_stats['ingresos_mes']) }}</strong></div>
+          <div class="summary-row"><span>Gastos del mes</span><strong>{{ formato_monto(dashboard_stats['gastos_mes']) }}</strong></div>
+          <div class="summary-row"><span>Pagado en gasto común</span><strong>{{ formato_monto(dashboard_stats['total_pagado']) }}</strong></div>
+          <div class="summary-row"><span>Saldo esperado</span><strong>{{ formato_monto(dashboard_stats['deuda_total']) }}</strong></div>
+        </div>
+        {% if current_user.role == 'admin' %}
+        <hr>
+        <div class="section-head mb-2">
+          <div>
+            <h2 class="h6 mb-1">Respaldos recientes</h2>
+            <p class="text-muted small mb-0">Protege el sistema antes de cambios grandes.</p>
+          </div>
+          <form method="post" action="{{ url_for('backups_create') }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-sm btn-primary">Crear</button>
+          </form>
+        </div>
+        {% if backups %}
+        <div class="backup-list">
+          {% for b in backups %}
+          <a class="backup-item" href="{{ url_for('backups_download', nombre=b['nombre']) }}">
+            <span class="small text-truncate">{{ b['nombre'] }}</span>
+            <span class="small text-muted">{{ '%.1f KB'|format(b['tamano']/1024) }}</span>
+          </a>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-muted small">Aún no hay respaldos.</div>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const labels = {{ reporte|map(attribute='mes')|list|tojson }};
+const ingresos = {{ reporte|map(attribute='ingresos')|list|tojson }};
+const gastos = {{ reporte|map(attribute='gastos')|list|tojson }};
+new Chart(document.getElementById('chartMensual'), {
+  type:'bar',
+  data:{
+    labels,
+    datasets:[
+      {label:'Ingresos', data:ingresos, borderRadius:10, maxBarThickness:32},
+      {label:'Gastos', data:gastos, borderRadius:10, maxBarThickness:32}
+    ]
+  },
+  options:{
+    responsive:true,
+    maintainAspectRatio:true,
+    plugins:{legend:{position:'bottom'}},
+    scales:{y:{beginAtZero:true}}
+  }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block title %}Pagos{% endblock %}
+{% block content %}
+{% set total_pagos = pagos|sum(attribute='monto') %}
+<div class="page-head d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <div class="page-eyebrow">Cobranza</div>
+    <h1 class="h3 mb-1">Pagos de gasto común</h1>
+    <div class="text-muted">Control de pagos por parcela y por mes.</div>
+  </div>
+  {% if current_user.can_edit() %}<a class="btn btn-primary" href="{{ url_for('pagos_new') }}">Registrar pago</a>{% endif %}
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><div class="metric-card compact"><div class="metric-top"><span>Registros</span><span class="metric-icon">💳</span></div><div class="metric-value">{{ pagos|length }}</div><div class="metric-foot">Pagos visibles con el filtro actual</div></div></div>
+  <div class="col-md-4"><div class="metric-card compact"><div class="metric-top"><span>Total visible</span><span class="metric-icon">💰</span></div><div class="metric-value metric-value-sm">{{ formato_monto(total_pagos or 0) }}</div><div class="metric-foot">Suma de la tabla actual</div></div></div>
+  <div class="col-md-4"><div class="metric-card compact"><div class="metric-top"><span>Mes filtrado</span><span class="metric-icon">🗓️</span></div><div class="metric-value metric-value-sm">{{ mes or 'Todos' }}</div><div class="metric-foot">Puedes dejarlo vacío para ver todo</div></div></div>
+</div>
+
+<div class="card shadow-sm mb-3 filter-card"><div class="card-body"><form class="row g-2 align-items-end">
+  <div class="col-lg-3"><label class="form-label">Mes</label><input class="form-control" type="month" name="mes" value="{{ mes }}"></div>
+  <div class="col-lg-4"><label class="form-label">Filtro rápido en pantalla</label><input class="form-control" placeholder="Parcela, sector, mes u observación" data-table-filter="#tabla-pagos"></div>
+  <div class="col-lg-2 d-grid"><button class="btn btn-outline-secondary">Filtrar</button></div>
+  <div class="col-lg-2 d-grid"><a class="btn btn-outline-light border" href="{{ url_for('pagos_list') }}">Limpiar</a></div>
+</form></div></div>
+
+<div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive" id="tabla-pagos"><table class="table table-hover mb-0 align-middle"><thead><tr><th>Parcela</th><th>Referencia</th><th>Fecha</th><th>Mes</th><th class="text-end">Monto</th><th>Observación</th><th></th></tr></thead><tbody>
+{% for row in pagos %}
+<tr data-filter-row data-filter-text="{{ row['nombre'] }} {{ row['curso'] or '' }} {{ row['fecha'] }} {{ row['mes'] }} {{ row['observacion'] or '' }} {{ row['monto'] }}">
+  <td><a class="fw-semibold text-decoration-none" href="{{ url_for('parcela_detail', parcela_id=row['parcela_id']) }}">{{ row['nombre'] }}</a></td>
+  <td>{{ row['curso'] or '-' }}</td>
+  <td>{{ row['fecha'] }}</td>
+  <td><span class="status-badge status-info">{{ row['mes'] }}</span></td>
+  <td class="text-end">{{ formato_monto(row['monto']) }}</td>
+  <td>{{ row['observacion'] or '-' }}</td>
+  <td class="text-end"><div class="d-inline-flex gap-2 flex-wrap justify-content-end"><a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pagos_comprobante', pago_id=row['id']) }}">PDF</a>{% if current_user.can_edit() %}<a class="btn btn-sm btn-outline-primary" href="{{ url_for('pagos_edit', pago_id=row['id']) }}">Editar</a><form method="post" action="{{ url_for('pagos_delete', pago_id=row['id']) }}" onsubmit="return confirm('¿Eliminar el pago de {{ row['nombre'] }} para {{ row['mes'] }}?');">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-outline-danger">Eliminar</button></form>{% endif %}</div></td>
+</tr>
+{% else %}<tr><td colspan="7" class="text-center text-muted py-4">Sin pagos.</td></tr>{% endfor %}
+<tr class="d-none"><td colspan="7" class="text-center text-muted py-4" data-empty-search>No hay resultados para ese filtro rápido.</td></tr>
+</tbody></table></div></div></div>
+{% endblock %}

@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+{% block title %}Categoría · {{ actividad['nombre'] }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h1 class="h3 mb-1">{{ actividad['nombre'] }}</h1>
+    <div class="text-muted">Fecha: {{ actividad['fecha'] }}{% if actividad['descripcion'] %} · {{ actividad['descripcion'] }}{% endif %}</div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a class="btn btn-outline-secondary" href="{{ url_for('actividades_list') }}">Volver</a>
+    {% if current_user.can_edit() %}
+      <a class="btn btn-outline-primary" href="{{ url_for('actividades_edit', actividad_id=actividad['id']) }}">Editar categoría</a>
+      <a class="btn btn-primary" href="{{ url_for('movimientos_new', tipo='ingreso', actividad_id=actividad['id'], next=url_for('actividad_detail', actividad_id=actividad['id'])) }}">Nuevo ingreso</a>
+      <a class="btn btn-outline-danger" href="{{ url_for('movimientos_new', tipo='gasto', actividad_id=actividad['id'], next=url_for('actividad_detail', actividad_id=actividad['id'])) }}">Nuevo egreso</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Ingresos vinculados</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen['ingresos']) }}</div><div class="text-muted">{{ resumen['cantidad_ingresos'] }} registro(s)</div></div></div></div>
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Egresos vinculados</div><div class="fs-4 fw-semibold">{{ formato_monto(resumen['gastos']) }}</div><div class="text-muted">{{ resumen['cantidad_gastos'] }} registro(s)</div></div></div></div>
+  <div class="col-md-4"><div class="card shadow-sm h-100"><div class="card-body"><div class="text-muted small">Balance categoría</div><div class="fs-4 fw-semibold">{{ formato_monto((resumen['ingresos'] or 0) - (resumen['gastos'] or 0)) }}</div><div class="text-muted">Ingresos menos egresos</div></div></div></div>
+</div>
+
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white"><h2 class="h5 mb-0">Ingresos relacionados</h2></div>
+  <div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>Fecha</th><th>Concepto</th><th>Parcela</th><th>Detalle</th><th>Origen</th><th class="text-end">Monto</th><th></th></tr></thead><tbody>
+  {% for row in ingresos %}
+    <tr>
+      <td>{{ row['fecha'] }}</td><td>{{ row['concepto'] }}</td><td>{{ row['parcela'] }}</td><td>{{ row['observacion'] or '-' }}</td><td>{{ row['origen'] }}</td><td class="text-end">{{ formato_monto(row['monto']) }}</td>
+      <td class="text-end">{% if current_user.can_edit() %}<div class="d-inline-flex gap-2"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('movimientos_edit', movimiento_id=row['id'], next=url_for('actividad_detail', actividad_id=actividad['id'])) }}">Editar</a><form method="post" action="{{ url_for('movimientos_delete', movimiento_id=row['id']) }}" onsubmit="return confirm('¿Eliminar el ingreso {{ row['concepto'] }}?');">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ url_for('actividad_detail', actividad_id=actividad['id']) }}"><button class="btn btn-sm btn-outline-danger">Eliminar</button></form></div>{% endif %}</td>
+    </tr>
+  {% else %}<tr><td colspan="7" class="text-center text-muted py-4">Esta categoría no tiene ingresos registrados.</td></tr>{% endfor %}
+  </tbody></table></div></div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-header bg-white"><h2 class="h5 mb-0">Egresos relacionados</h2></div>
+  <div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>Fecha</th><th>Concepto</th><th>Detalle</th><th>Origen</th><th class="text-end">Monto</th><th></th></tr></thead><tbody>
+  {% for row in gastos %}
+    <tr>
+      <td>{{ row['fecha'] }}</td><td>{{ row['concepto'] }}</td><td>{{ row['observacion'] or '-' }}</td><td>{{ row['origen'] }}</td><td class="text-end">{{ formato_monto(row['monto']) }}</td>
+      <td class="text-end">{% if current_user.can_edit() %}<div class="d-inline-flex gap-2"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('movimientos_edit', movimiento_id=row['id'], next=url_for('actividad_detail', actividad_id=actividad['id'])) }}">Editar</a><form method="post" action="{{ url_for('movimientos_delete', movimiento_id=row['id']) }}" onsubmit="return confirm('¿Eliminar el egreso {{ row['concepto'] }}?');">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ url_for('actividad_detail', actividad_id=actividad['id']) }}"><button class="btn btn-sm btn-outline-danger">Eliminar</button></form></div>{% endif %}</td>
+    </tr>
+  {% else %}<tr><td colspan="6" class="text-center text-muted py-4">Esta categoría no tiene egresos registrados.</td></tr>{% endfor %}
+  </tbody></table></div></div>
+</div>
+{% endblock %}

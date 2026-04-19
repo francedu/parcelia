@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block title %}Movimientos{% endblock %}
+{% block content %}
+{% set ingresos = movimientos|selectattr('tipo', 'equalto', 'ingreso')|list %}
+{% set gastos = movimientos|selectattr('tipo', 'equalto', 'gasto')|list %}
+<div class="page-head d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <div class="page-eyebrow">Caja y movimientos</div>
+    <h1 class="h3 mb-1">Movimientos</h1>
+    <div class="text-muted">Filtra, exporta y revisa ingresos y gastos.</div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap align-items-center">
+    <div class="btn-group"><a class="btn btn-outline-secondary" href="{{ url_for('movimientos_export', fmt='csv', tipo=tipo, mes=mes, q=q) }}">CSV</a><a class="btn btn-outline-secondary" href="{{ url_for('movimientos_export', fmt='xlsx', tipo=tipo, mes=mes, q=q) }}">Excel</a><a class="btn btn-outline-secondary" href="{{ url_for('movimientos_export', fmt='pdf', tipo=tipo, mes=mes, q=q) }}">PDF</a></div>
+    {% if current_user.can_edit() %}<a class="btn btn-primary" href="{{ url_for('movimientos_new') }}">Nuevo movimiento</a>{% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><div class="metric-card compact"><div class="metric-top"><span>Ingresos</span><span class="metric-icon">➕</span></div><div class="metric-value metric-value-sm">{{ formato_monto(ingresos|sum(attribute='monto') or 0) }}</div><div class="metric-foot">{{ ingresos|length }} registros visibles</div></div></div>
+  <div class="col-md-4"><div class="metric-card compact"><div class="metric-top"><span>Gastos</span><span class="metric-icon">🧾</span></div><div class="metric-value metric-value-sm">{{ formato_monto(gastos|sum(attribute='monto') or 0) }}</div><div class="metric-foot">{{ gastos|length }} registros visibles</div></div></div>
+  <div class="col-md-4"><div class="metric-card compact"><div class="metric-top"><span>Balance visible</span><span class="metric-icon">📊</span></div><div class="metric-value metric-value-sm">{{ formato_monto((ingresos|sum(attribute='monto') or 0) - (gastos|sum(attribute='monto') or 0)) }}</div><div class="metric-foot">Con los filtros aplicados</div></div></div>
+</div>
+
+<div class="card shadow-sm mb-3 filter-card"><div class="card-body"><form class="row g-2 align-items-end">
+  <div class="col-md-3"><label class="form-label">Buscar</label><input class="form-control" name="q" value="{{ q }}" placeholder="Concepto u observación"></div>
+  <div class="col-md-2"><label class="form-label">Tipo</label><select class="form-select" name="tipo"><option {% if tipo=='Todos' %}selected{% endif %}>Todos</option><option {% if tipo=='ingreso' %}selected{% endif %}>ingreso</option><option {% if tipo=='gasto' %}selected{% endif %}>gasto</option></select></div>
+  <div class="col-md-2"><label class="form-label">Mes</label><input class="form-control" type="month" name="mes" value="{{ mes }}"></div>
+  <div class="col-md-2"><label class="form-label">Desde</label><input class="form-control" type="date" name="fecha_desde" value="{{ fecha_desde }}"></div>
+  <div class="col-md-2"><label class="form-label">Hasta</label><input class="form-control" type="date" name="fecha_hasta" value="{{ fecha_hasta }}"></div>
+  <div class="col-md-3"><label class="form-label">Categoría</label><select class="form-select" name="actividad_id"><option value="">Todas las categorías</option>{% for a in actividades %}<option value="{{ a['id'] }}" {% if actividad_id|string==a['id']|string %}selected{% endif %}>{{ a['nombre'] }}</option>{% endfor %}</select></div>
+  <div class="col-md-3"><label class="form-label">Parcela</label><select class="form-select" name="parcela_id"><option value="">Todas las parcelas</option>{% for parcela in parcelas %}<option value="{{ parcela['id'] }}" {% if parcela_id|string==parcela['id']|string %}selected{% endif %}>{{ parcela['nombre'] }}{% if parcela['curso'] %} ({{ parcela['curso'] }}){% endif %}</option>{% endfor %}</select></div>
+  <div class="col-md-3"><label class="form-label">Filtro rápido en pantalla</label><input class="form-control" placeholder="Filtra sin recargar" data-table-filter="#tabla-movimientos"></div>
+  <div class="col-auto"><button class="btn btn-outline-secondary">Aplicar</button></div>
+  <div class="col-auto"><a class="btn btn-outline-light border" href="{{ url_for('movimientos_list') }}">Limpiar</a></div>
+</form></div></div>
+
+<div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive" id="tabla-movimientos"><table class="table table-hover mb-0 align-middle"><thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Categoría</th><th>Parcela</th><th>Origen</th><th class="text-end">Monto</th><th></th></tr></thead><tbody>
+{% for row in movimientos %}<tr data-filter-row data-filter-text="{{ row['fecha'] }} {{ row['tipo'] }} {{ row['concepto'] }} {{ row['actividad'] }} {{ row['parcela'] }} {{ row['origen'] }} {{ row['monto'] }}"><td>{{ row['fecha'] }}</td><td><span class="status-badge {{ 'status-success' if row['tipo']=='ingreso' else 'status-danger' }}">{{ row['tipo'] }}</span></td><td class="fw-semibold">{{ row['concepto'] }}</td><td>{{ row['actividad'] }}</td><td>{{ row['parcela'] }}</td><td>{{ row['origen'] }}</td><td class="text-end">{{ formato_monto(row['monto']) }}</td><td class="text-end">{% if current_user.can_edit() %}<div class="d-inline-flex gap-2 flex-wrap justify-content-end"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('movimientos_edit', movimiento_id=row['id'], condominio_id=row['condominio_id'] if current_user.is_global_admin() else None, next=request.full_path) }}">Editar</a><form method="post" action="{{ url_for('movimientos_delete', movimiento_id=row['id'], condominio_id=row['condominio_id'] if current_user.is_global_admin() else None) }}" onsubmit="return confirm('¿Eliminar el movimiento {{ row['concepto'] }}?');">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ request.full_path }}">{% if current_user.is_global_admin() %}<input type="hidden" name="condominio_id" value="{{ row['condominio_id'] }}">{% endif %}<button class="btn btn-sm btn-outline-danger">Eliminar</button></form></div>{% endif %}</td></tr>{% else %}<tr><td colspan="8" class="text-center text-muted py-4">Sin movimientos.</td></tr>{% endfor %}
+<tr class="d-none"><td colspan="8" class="text-center text-muted py-4" data-empty-search>No hay resultados para ese filtro rápido.</td></tr>
+</tbody></table></div></div></div>
+{% endblock %}

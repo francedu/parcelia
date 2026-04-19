@@ -1,0 +1,91 @@
+{% extends 'base.html' %}
+{% block title %}Parcelas{% endblock %}
+{% block content %}
+{% set activos = parcelas|selectattr('activo')|list|length %}
+{% set inactivos = parcelas|rejectattr('activo')|list|length %}
+<div class="page-head d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <div class="page-eyebrow">Gestión de parcelas</div>
+    <h1 class="h3 mb-1">Parcelas</h1>
+    <div class="text-muted">Deuda total del mes {{ mes }}: <strong>{{ formato_monto(deuda_total) }}</strong></div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    {% if current_user.can_edit() %}<a class="btn btn-primary" href="{{ url_for('parcelas_new') }}">Nueva parcela</a>{% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Total registros</span><span class="metric-icon">👥</span></div><div class="metric-value">{{ parcelas|length }}</div><div class="metric-foot">Parcelas registradas</div></div></div>
+  <div class="col-md-4 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Activos</span><span class="metric-icon">✅</span></div><div class="metric-value">{{ activos }}</div><div class="metric-foot">Con cobro vigente</div></div></div>
+  <div class="col-md-4 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Inactivos</span><span class="metric-icon">📁</span></div><div class="metric-value">{{ inactivos }}</div><div class="metric-foot">Sin cobro actual</div></div></div>
+  <div class="col-md-6 col-xl-3"><div class="metric-card compact"><div class="metric-top"><span>Mes consultado</span><span class="metric-icon">🗓️</span></div><div class="metric-value metric-value-sm">{{ mes }}</div><div class="metric-foot">Pagos y deuda calculados</div></div></div>
+</div>
+
+<div class="card shadow-sm mb-3 filter-card">
+  <div class="card-body">
+    <form class="row g-2 align-items-end">
+      <div class="col-lg-4">
+        <label class="form-label">Buscar por parcela, propietario o sector</label>
+        <input class="form-control" name="q" value="{{ q }}" placeholder="Ej. Parcela 05 o Referencia A">
+      </div>
+      <div class="col-lg-3">
+        <label class="form-label">Mes</label>
+        <input class="form-control" type="month" name="mes" value="{{ mes }}">
+      </div>
+      <div class="col-lg-3">
+        <label class="form-label">Filtro rápido en pantalla</label>
+        <input class="form-control" placeholder="Escribe para filtrar sin recargar" data-table-filter="#tabla-parcelas">
+      </div>
+      <div class="col-lg-2 d-grid">
+        <button class="btn btn-outline-secondary">Aplicar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive" id="tabla-parcelas">
+      <table class="table table-hover mb-0 align-middle">
+        <thead>
+          <tr>
+            <th>Parcela</th><th>Referencia</th><th class="text-end">Gasto común</th><th class="text-end">Pagado {{ mes }}</th><th class="text-end">Debe {{ mes }}</th><th>Estado</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for parcela in parcelas %}
+        {% set deuda = [parcela['cuota_mensual'] - parcela['pagado_mes'], 0]|max %}
+        <tr data-filter-row data-filter-text="{{ parcela['nombre'] }} {{ parcela['curso'] or '' }} {{ 'activo' if parcela['activo'] else 'inactivo' }} {{ deuda }}">
+          <td>
+            <a class="fw-semibold text-decoration-none" href="{{ url_for('parcela_detail', parcela_id=parcela['id'], mes=mes) }}">{{ parcela['nombre'] }}</a>
+            <div class="small text-muted">ID #{{ parcela['id'] }}</div>
+          </td>
+          <td>{{ parcela['curso'] or '-' }}</td>
+          <td class="text-end">{{ formato_monto(parcela['cuota_mensual']) }}</td>
+          <td class="text-end">{{ formato_monto(parcela['pagado_mes']) }}</td>
+          <td class="text-end">
+            <span class="status-badge {{ 'status-danger' if deuda > 0 else 'status-success' }}">{{ formato_monto(deuda) }}</span>
+          </td>
+          <td>
+            <span class="status-badge {{ 'status-success' if parcela['activo'] else 'status-muted' }}">{{ 'Activo' if parcela['activo'] else 'Inactivo' }}</span>
+          </td>
+          <td class="text-end">
+            <div class="d-inline-flex gap-2 flex-wrap justify-content-end">
+              <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('parcela_detail', parcela_id=parcela['id'], mes=mes) }}">Ficha</a>
+              {% if current_user.can_edit() %}<a class="btn btn-sm btn-outline-success" href="{{ url_for('pagos_new') }}?parcela_id={{ parcela['id'] }}">Registrar pago</a>{% endif %}
+              {% if current_user.can_edit() %}<a class="btn btn-sm btn-outline-primary" href="{{ url_for('parcelas_edit', parcela_id=parcela['id']) }}">Editar</a>{% endif %}
+              {% if current_user.can_delete() %}<form method="post" action="{{ url_for('parcelas_delete', parcela_id=parcela['id']) }}" onsubmit="return confirm('¿Eliminar {{ parcela['nombre'] }} y sus pagos asociados?');">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-outline-danger">Eliminar</button></form>{% endif %}
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="text-center text-muted py-4">Sin parcelas.</td></tr>
+        {% endfor %}
+        <tr class="d-none"><td colspan="7" class="text-center text-muted py-4" data-empty-search>No hay resultados para ese filtro rápido.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}Usuario{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">{{ 'Editar usuario' if usuario else 'Nuevo usuario' }}</h1>
+<div class="card shadow-sm"><div class="card-body"><form method="post" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+  <div class="col-md-6"><label class="form-label">Nombre</label><input class="form-control" name="nombre" value="{{ usuario['nombre'] if usuario else '' }}" required></div>
+  <div class="col-md-6"><label class="form-label">Usuario</label><input class="form-control" name="username" value="{{ usuario['username'] if usuario else '' }}" required></div>
+  <div class="col-md-4"><label class="form-label">Rol</label><select class="form-select" name="role">{% for role in roles %}<option value="{{ role }}" {% if usuario and usuario['role']==role %}selected{% endif %}>{{ ROLE_LABELS.get(role, role) }}</option>{% endfor %}</select></div>
+  <div class="col-md-4"><label class="form-label">Condominio</label><select class="form-select" name="condominio_id" {% if not current_user.is_global_admin() %}disabled{% endif %}>{% if current_user.is_global_admin() %}<option value="">Sin condominio (solo admin global)</option>{% for c in condominios %}<option value="{{ c['id'] }}" {% if usuario and usuario['condominio_id'] == c['id'] %}selected{% endif %}>{{ c['nombre'] }}</option>{% endfor %}{% else %}{% for c in condominios %}{% if c['id'] == current_user.condominio_id %}<option value="{{ c['id'] }}" selected>{{ c['nombre'] }}</option>{% endif %}{% endfor %}{% endif %}</select>{% if not current_user.is_global_admin() %}<input type="hidden" name="condominio_id" value="{{ current_user.condominio_id }}">{% endif %}</div>
+  <div class="col-md-4"><label class="form-label">{{ 'Nueva contraseña (opcional)' if usuario else 'Contraseña' }}</label><input class="form-control" type="password" name="password" {% if not usuario %}required{% endif %}></div>
+  <div class="col-12 form-check ms-2"><input class="form-check-input" type="checkbox" name="activo" {% if not usuario or usuario['activo'] %}checked{% endif %}><label class="form-check-label">Usuario activo</label></div>
+  <div class="col-12 d-flex gap-2"><button class="btn btn-primary">Guardar</button><a class="btn btn-outline-secondary" href="{{ url_for('usuarios_list') }}">Cancelar</a></div>
+</form></div></div>
+{% endblock %}

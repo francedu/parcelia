@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block title %}Iniciar sesión{% endblock %}
+{% block content %}
+<section class="login-viewport">
+  <div class="login-wrap login-wrap-full">
+    <div class="login-side-copy">
+      <div class="hero-badge">Parcelia</div>
+      <h2>Administra parcelas en condominios desde una experiencia clara y moderna</h2>
+      <p>Una interfaz de acceso pensada para administradores y comités, con entrada directa al panel y foco en la operación diaria de comunidades de parcelas.</p>
+      <div class="login-feature-grid">
+        <div class="login-feature"><strong>Control financiero</strong><span>Cuotas, pagos, morosidad y egresos en un solo lugar.</span></div>
+        <div class="login-feature"><strong>Operación centralizada</strong><span>Uno o varios condominios gestionados desde una sola cuenta.</span></div>
+        <div class="login-feature"><strong>Seguimiento continuo</strong><span>Actas, reportes y movimientos disponibles desde el panel.</span></div>
+      </div>
+      <div class="login-spotlight-grid">
+        <div class="login-spotlight">
+          <span class="login-spotlight-value">24/7</span>
+          <span class="login-spotlight-label">Acceso al panel administrativo</span>
+        </div>
+        <div class="login-spotlight">
+          <span class="login-spotlight-value">Multi</span>
+          <span class="login-spotlight-label">Gestión por condominio y usuarios</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow login-card border-0">
+      <div class="card-body p-4 p-md-5">
+        <div class="login-brand">
+          <div class="login-brand-mark" aria-hidden="true"></div>
+          <div class="login-brand-copy">
+            <div class="page-eyebrow">Acceso al sistema</div>
+            <h1 class="h3 mb-1">Bienvenido a Parcelia</h1>
+            <p class="text-muted mb-0">Ingresa al panel de administración</p>
+          </div>
+        </div>
+        <p class="text-muted mb-3">Accede para administrar parcelas, registrar movimientos, revisar reportes y controlar el estado financiero de cada comunidad.</p>
+        <div class="demo-login-box mb-4">
+          <div>
+            <strong>¿Quieres probarla ahora?</strong>
+            <span>La demo incluye Parcelas Vista Campo (Demo), cobranza, morosidad, movimientos y acta de comité.</span>
+          </div>
+          <div class="demo-login-actions">
+            <code>{{ demo_credentials.username }} / {{ demo_credentials.password }}</code>
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('demo_login') }}">Entrar a la demo</a>
+          </div>
+        </div>
+        <form method="post" class="row g-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+          <div class="col-12"><label class="form-label">Usuario</label><input class="form-control form-control-lg" name="username" required autofocus placeholder="Ingresa tu usuario"></div>
+          <div class="col-12">
+            <label class="form-label">Contraseña</label>
+            <div class="input-group input-group-lg">
+              <input class="form-control" id="passwordField" type="password" name="password" required placeholder="Ingresa tu contraseña">
+              <button class="btn btn-outline-secondary" type="button" data-toggle-password="#passwordField">Mostrar</button>
+            </div>
+          </div>
+          <div class="col-12 d-grid"><button class="btn btn-primary btn-lg">Entrar al panel</button></div>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
