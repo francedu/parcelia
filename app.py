@@ -482,11 +482,11 @@ def create_app() -> Flask:
 
 
     LANDING_CONTACTO = {
-        'telefono_principal': '+56 9 0000 0000',
-        'telefono_secundario': '+56 2 0000 0000',
+        'telefono_principal': '+56 9 8826 2337',
+        'telefono_secundario': '+56 9 8826 2337',
         'email': app.config['MAIL_TO'],
         'horario': 'Lunes a viernes · 09:00 a 18:00',
-        'whatsapp_url': 'https://wa.me/56900000000',
+        'whatsapp_url': 'https://wa.me/56988262337',
     }
 
     def send_contact_request_email(nombre: str, email: str, telefono: str, condominio: str, mensaje: str) -> None:
