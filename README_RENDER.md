@@ -69,3 +69,21 @@ Si ya migraste tus usuarios desde SQLite/PostgreSQL, se respetarán esos datos.
 - Revisa `/healthz` después del deploy para confirmar conectividad con base de datos.
 
 - En local o pruebas por HTTP, deja `SESSION_COOKIE_SECURE=0` o usa `APP_ENV=development` para que login, formularios y demo funcionen correctamente sin HTTPS.
+
+
+## Envío de correos desde la landing
+
+Para que el formulario `Solicitar contacto` envíe correos a `parceliaMP@gmail.com`, configura estas variables en Render:
+
+```
+MAIL_TO=parceliaMP@gmail.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=parceliaMP@gmail.com
+SMTP_PASSWORD=TU_APP_PASSWORD_DE_GMAIL
+SMTP_USE_TLS=1
+SMTP_USE_SSL=0
+MAIL_FROM=parceliaMP@gmail.com
+```
+
+En Gmail debes crear una **App Password** y usarla en `SMTP_PASSWORD`.

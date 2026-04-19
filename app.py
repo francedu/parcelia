@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import smtplib
 import sqlite3
 import subprocess
+import ssl
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -15,6 +17,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 import csv
 import shutil
+from email.message import EmailMessage
 from io import BytesIO, StringIO
 
 from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
@@ -261,6 +264,14 @@ def create_app() -> Flask:
 
     app.config['SECRET_KEY'] = secret_key
     app.config['DATABASE'] = os.environ.get('DATABASE_URL', str(DB_PATH))
+    app.config['MAIL_TO'] = os.environ.get('MAIL_TO', 'parceliaMP@gmail.com').strip() or 'parceliaMP@gmail.com'
+    app.config['SMTP_HOST'] = os.environ.get('SMTP_HOST', 'smtp.gmail.com').strip() or 'smtp.gmail.com'
+    app.config['SMTP_PORT'] = int(os.environ.get('SMTP_PORT', '587'))
+    app.config['SMTP_USER'] = os.environ.get('SMTP_USER', '').strip()
+    app.config['SMTP_PASSWORD'] = os.environ.get('SMTP_PASSWORD', '').strip()
+    app.config['SMTP_USE_TLS'] = os.environ.get('SMTP_USE_TLS', '1') == '1'
+    app.config['SMTP_USE_SSL'] = os.environ.get('SMTP_USE_SSL', '0') == '1'
+    app.config['MAIL_FROM'] = os.environ.get('MAIL_FROM', app.config['SMTP_USER'] or app.config['MAIL_TO']).strip()
 
     app_env = os.environ.get('APP_ENV', os.environ.get('FLASK_ENV', '')).strip().lower()
     explicit_secure = os.environ.get('SESSION_COOKIE_SECURE')
@@ -473,10 +484,52 @@ def create_app() -> Flask:
     LANDING_CONTACTO = {
         'telefono_principal': '+56 9 0000 0000',
         'telefono_secundario': '+56 2 0000 0000',
-        'email': 'contacto@parcelia.cl',
+        'email': app.config['MAIL_TO'],
         'horario': 'Lunes a viernes · 09:00 a 18:00',
         'whatsapp_url': 'https://wa.me/56900000000',
     }
+
+    def send_contact_request_email(nombre: str, email: str, telefono: str, condominio: str, mensaje: str) -> None:
+        smtp_user = app.config['SMTP_USER']
+        smtp_password = app.config['SMTP_PASSWORD']
+        if not smtp_user or not smtp_password:
+            raise RuntimeError('Configura SMTP_USER y SMTP_PASSWORD para enviar correos desde la landing.')
+
+        destinatario = app.config['MAIL_TO']
+        mail_from = app.config['MAIL_FROM'] or smtp_user
+        asunto = f'Solicitud de información Parcelia · {nombre}'
+        cuerpo = (
+            'Se recibió una nueva solicitud de información desde la landing de Parcelia.\n\n'
+            f'Nombre: {nombre or "-"}\n'
+            f'Correo: {email or "-"}\n'
+            f'Teléfono: {telefono or "-"}\n'
+            f'Condominio: {condominio or "-"}\n\n'
+            'Mensaje:\n'
+            f'{mensaje or "-"}\n'
+        )
+
+        msg = EmailMessage()
+        msg['Subject'] = asunto
+        msg['From'] = mail_from
+        msg['To'] = destinatario
+        msg['Reply-To'] = email
+        msg.set_content(cuerpo)
+
+        smtp_host = app.config['SMTP_HOST']
+        smtp_port = app.config['SMTP_PORT']
+
+        if app.config['SMTP_USE_SSL']:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30, context=ssl.create_default_context()) as server:
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.ehlo()
+                if app.config['SMTP_USE_TLS']:
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
 
     @app.route('/solicitar-informacion', methods=['POST'])
     def solicitar_informacion():
@@ -498,6 +551,14 @@ def create_app() -> Flask:
             condominio,
             mensaje,
         )
+
+        try:
+            send_contact_request_email(nombre, email, telefono, condominio, mensaje)
+        except Exception as exc:
+            app.logger.exception('No se pudo enviar la solicitud de información por correo: %s', exc)
+            flash('Recibimos tu solicitud, pero no pudimos enviarla por correo en este momento. Escríbenos a %s.' % app.config['MAIL_TO'], 'warning')
+            return redirect(url_for('landing'))
+
         flash('Recibimos tu solicitud para Parcelia. Te contactaremos pronto.', 'success')
         return redirect(url_for('landing'))
 
