@@ -187,7 +187,7 @@
           <div class="summary-row"><span>Pagado en gasto común</span><strong>{{ formato_monto(dashboard_stats['total_pagado']) }}</strong></div>
           <div class="summary-row"><span>Saldo esperado</span><strong>{{ formato_monto(dashboard_stats['deuda_total']) }}</strong></div>
         </div>
-        {% if current_user.role == 'admin' %}
+        {% if current_user.is_global_admin() and not current_user.is_demo_db %}
         <hr>
         <div class="section-head mb-2">
           <div>

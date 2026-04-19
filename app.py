@@ -843,13 +843,13 @@ def create_app() -> Flask:
         return redirect(url_for('movimientos_list', tipo=tipo, mes=mes, q=q))
 
     @app.route('/backups')
-    @role_required('admin')
+    @global_admin_required
     def backups_list():
         backups = listar_backups()
         return render_template('backups.html', backups=backups)
 
     @app.post('/backups/crear')
-    @role_required('admin')
+    @global_admin_required
     def backups_create():
         try:
             ruta = crear_backup_db(app.config['DATABASE'])
@@ -859,7 +859,7 @@ def create_app() -> Flask:
         return redirect_back('backups_list')
 
     @app.get('/backups/<path:nombre>')
-    @role_required('admin')
+    @global_admin_required
     def backups_download(nombre: str):
         ruta = BACKUP_DIR / nombre
         if not ruta.exists() or ruta.parent != BACKUP_DIR:
@@ -1138,6 +1138,7 @@ def create_app() -> Flask:
         return send_file(data, mimetype='application/pdf', as_attachment=True, download_name=nombre)
     @app.route('/parcelas', endpoint='parcelas_list')
     @app.route('/parcelas')
+    @app.route('/alumnos')
     @login_required
     def parcelas_list():
         db = get_db()
@@ -1161,6 +1162,7 @@ def create_app() -> Flask:
         return render_template('parcelas_list.html', parcelas=parcelas, q=q, mes=mes, deuda_total=deuda_total)
     @app.route('/parcelas/nuevo', methods=['GET', 'POST'], endpoint='parcelas_new')
     @app.route('/parcelas/nuevo', methods=['GET', 'POST'])
+    @app.route('/alumnos/nuevo', methods=['GET', 'POST'])
     @role_required('admin', 'tesorero')
     def parcelas_new():
         db = get_db()
@@ -1188,6 +1190,7 @@ def create_app() -> Flask:
         return render_template('parcelas_form.html', parcela=None)
     @app.route('/parcelas/<int:parcela_id>/editar', methods=['GET', 'POST'], endpoint='parcelas_edit')
     @app.route('/parcelas/<int:parcela_id>/editar', methods=['GET', 'POST'])
+    @app.route('/alumnos/<int:parcela_id>/editar', methods=['GET', 'POST'])
     @role_required('admin', 'tesorero')
     def parcelas_edit(parcela_id: int):
         db = get_db()
@@ -1220,6 +1223,7 @@ def create_app() -> Flask:
         return render_template('parcelas_form.html', parcela=parcela)
     @app.post('/parcelas/<int:parcela_id>/eliminar', endpoint='parcelas_delete')
     @app.post('/parcelas/<int:parcela_id>/eliminar')
+    @app.post('/alumnos/<int:parcela_id>/eliminar')
     @role_required('admin', 'tesorero')
     def parcelas_delete(parcela_id: int):
         db = get_db()
@@ -1235,6 +1239,7 @@ def create_app() -> Flask:
         return redirect(url_for('parcelas_list'))
     @app.route('/parcelas/<int:parcela_id>', endpoint='parcela_detail')
     @app.route('/parcelas/<int:parcela_id>')
+    @app.route('/alumnos/<int:parcela_id>')
     @login_required
     def parcela_detail(parcela_id: int):
         db = get_db()
