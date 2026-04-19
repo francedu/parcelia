@@ -2906,6 +2906,13 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS telefono TEXT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS direccion TEXT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS observacion_ficha TEXT',
+            'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE movimientos ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE pagos_parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE actas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE actividades ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE ciclos_cobranza ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
         ]
     else:
         migration_statements = [
