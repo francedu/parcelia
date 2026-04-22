@@ -298,7 +298,10 @@ def create_app() -> Flask:
     app.config['REMEMBER_COOKIE_SECURE'] = remember_secure
     app.config['REMEMBER_COOKIE_HTTPONLY'] = True
     app.config['REMEMBER_COOKIE_SAMESITE'] = os.environ.get('REMEMBER_COOKIE_SAMESITE', 'Lax')
-    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=int(os.environ.get('SESSION_LIFETIME_HOURS', '12')))
+    session_lifetime_minutes = int(os.environ.get('SESSION_LIFETIME_MINUTES', '720'))
+    inactivity_timeout_minutes = int(os.environ.get('INACTIVITY_TIMEOUT_MINUTES', '15'))
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=session_lifetime_minutes)
+    app.config['INACTIVITY_TIMEOUT_SECONDS'] = inactivity_timeout_minutes * 60
     app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH_MB', '16')) * 1024 * 1024
 
     if os.environ.get('TRUST_PROXY', '1') == '1':
@@ -335,6 +338,20 @@ def create_app() -> Flask:
             validate_csrf()
         if current_user.is_authenticated:
             session.permanent = True
+            now_ts = int(datetime.now().timestamp())
+            last_activity_ts = int(session.get('last_activity_ts', now_ts) or now_ts)
+            inactivity_timeout = int(app.config.get('INACTIVITY_TIMEOUT_SECONDS', 0) or 0)
+            ignored_endpoints = {'static', 'login', 'logout', 'healthz'}
+            if (
+                inactivity_timeout > 0
+                and request.endpoint not in ignored_endpoints
+                and now_ts - last_activity_ts > inactivity_timeout
+            ):
+                logout_user()
+                session.clear()
+                flash('Tu sesión expiró por inactividad.', 'warning')
+                return redirect(url_for('login', next=request.full_path if request.full_path.startswith('/') else request.path))
+            session['last_activity_ts'] = now_ts
 
     @app.after_request
     def set_security_headers(response):
@@ -389,6 +406,7 @@ def create_app() -> Flask:
             'current_condominio': condominio_actual,
             'active_condominio_id': get_current_condominio_id(db),
             'admin_condominios': db.fetchall('SELECT id, nombre, activo FROM condominios ORDER BY nombre') if getattr(current_user, 'is_authenticated', False) and getattr(current_user, 'is_global_admin', lambda: False)() else [],
+            'inactivity_timeout_seconds': int(app.config.get('INACTIVITY_TIMEOUT_SECONDS', 0) or 0),
         }
 
     def get_database_url_for_request() -> str:
@@ -646,6 +664,7 @@ def create_app() -> Flask:
             row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE lower(u.username) = ? AND u.activo = 1', (username,))
             if row and check_password_hash(row['password_hash'], password):
                 login_user(User(row, is_demo_db=is_demo_login), remember=not is_demo_login)
+                session['last_activity_ts'] = int(datetime.now().timestamp())
                 flash(f'Bienvenido, {row["nombre"]}.', 'success')
                 next_url = request.form.get('next', '').strip() or request.args.get('next', '').strip()
                 return redirect_to_local_url(next_url, 'dashboard')
@@ -666,6 +685,7 @@ def create_app() -> Flask:
             flash('La cuenta demo aún no está disponible.', 'danger')
             return redirect(url_for('login'))
         login_user(User(row, is_demo_db=True), remember=False)
+        session['last_activity_ts'] = int(datetime.now().timestamp())
         flash('Entraste a la demo de Parcelia.', 'success')
         return redirect(url_for('dashboard'))
 
@@ -675,6 +695,7 @@ def create_app() -> Flask:
         logout_user()
         session.pop('db_mode', None)
         session.pop('_csrf_token', None)
+        session.pop('last_activity_ts', None)
         flash('Sesión cerrada.', 'success')
         return redirect(url_for('login'))
 
