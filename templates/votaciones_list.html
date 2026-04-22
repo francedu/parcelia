@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Votaciones{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h1 class="h3 mb-0">Votaciones de la reunión</h1>
+    <p class="text-muted mb-0">{{ acta['titulo'] }} · {{ acta['fecha'] }}</p>
+  </div>
+  <div class="d-flex gap-2">
+    <a class="btn btn-outline-secondary" href="{{ url_for('actas_list') }}">Volver a actas</a>
+    {% if current_user.can_manage_actas() %}<a class="btn btn-primary" href="{{ url_for('votacion_new', acta_id=acta['id']) }}">Nueva votación</a>{% endif %}
+  </div>
+</div>
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead><tr><th>Título</th><th>Estado</th><th>Opciones</th><th>Votos</th><th>Creada</th><th></th></tr></thead>
+        <tbody>
+        {% for v in votaciones %}
+          <tr>
+            <td><div class="fw-semibold">{{ v['titulo'] }}</div><small class="text-muted">{{ v['descripcion'] or 'Sin descripción' }}</small></td>
+            <td><span class="badge text-bg-{% if v['estado']=='cerrada' %}secondary{% else %}success{% endif %}">{{ v['estado'] }}</span></td>
+            <td>{{ v['total_opciones'] }}</td>
+            <td>{{ v['total_votos'] }}</td>
+            <td>{{ v['created_at'] or '-' }}</td>
+            <td class="text-end"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('votacion_detail', votacion_id=v['id']) }}">Ver detalle</a></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="text-center py-4 text-muted">Todavía no hay votaciones asociadas a esta acta.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

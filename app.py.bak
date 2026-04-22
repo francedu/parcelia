@@ -71,7 +71,6 @@ class User(UserMixin):
         self.activo = bool(row['activo'])
         self.condominio_id = row['condominio_id'] if 'condominio_id' in row.keys() else None
         self.condominio_nombre = row['condominio_nombre'] if 'condominio_nombre' in row.keys() else None
-        self.parcela_id = row['parcela_id'] if 'parcela_id' in row.keys() else None
         self.is_demo_db = is_demo_db
 
 
@@ -931,9 +930,9 @@ def create_app() -> Flask:
     def usuarios_list():
         db = get_db()
         if current_user.is_global_admin():
-            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username")
+            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username")
         else:
-            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id WHERE u.condominio_id = ? ORDER BY u.nombre, u.username", (current_user.condominio_id,))
+            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.condominio_id = ? ORDER BY u.nombre, u.username", (current_user.condominio_id,))
         return render_template('usuarios_list.html', usuarios=usuarios)
 
     @app.route('/usuarios/nuevo', methods=['GET', 'POST'])
@@ -941,8 +940,6 @@ def create_app() -> Flask:
     def usuarios_new():
         db = get_db()
         condominios = db.fetchall('SELECT id, nombre, activo FROM condominios WHERE activo = 1 ORDER BY nombre')
-        condominio_ref = int(current_user.condominio_id) if not current_user.is_global_admin() and current_user.condominio_id else None
-        parcelas_disponibles = db.fetchall('SELECT id, nombre, curso, condominio_id FROM parcelas WHERE activo = 1 ORDER BY nombre') if current_user.is_global_admin() else db.fetchall('SELECT id, nombre, curso, condominio_id FROM parcelas WHERE activo = 1 AND condominio_id = ? ORDER BY nombre', (condominio_ref,))
         if request.method == 'POST':
             nombre = request.form.get('nombre', '').strip()
             username = request.form.get('username', '').strip().lower()
@@ -951,13 +948,11 @@ def create_app() -> Flask:
             activo = 1 if request.form.get('activo') == 'on' else 0
             condominio_raw = request.form.get('condominio_id', '').strip()
             condominio_id = int(condominio_raw) if condominio_raw.isdigit() else None
-            parcela_raw = request.form.get('parcela_id', '').strip()
-            parcela_id = int(parcela_raw) if parcela_raw.isdigit() else None
             if not current_user.is_global_admin():
                 condominio_id = int(current_user.condominio_id) if current_user.condominio_id else None
                 if role == 'admin' and condominio_id is None:
                     flash('Debes asignar un condominio para este administrador.', 'danger')
-                    return render_template('usuarios_form.html', usuario=None, roles=ALLOWED_ROLES, condominios=condominios, parcelas=parcelas_disponibles)
+                    return render_template('usuarios_form.html', usuario=None, roles=ALLOWED_ROLES, condominios=condominios)
             if not nombre or not username or not password:
                 flash('Nombre, usuario y contraseña son obligatorios.', 'danger')
             elif role not in ALLOWED_ROLES:
@@ -966,27 +961,23 @@ def create_app() -> Flask:
                 flash('Solo puedes crear administradores dentro de tu propio condominio.', 'danger')
             elif role != 'admin' and condominio_id is None:
                 flash('Debes asignar un condominio al usuario.', 'danger')
-            elif parcela_id and not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
-                flash('La parcela seleccionada no pertenece al condominio del usuario.', 'danger')
-            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ?', (parcela_id,)):
-                flash('Esa parcela ya está vinculada a otro usuario.', 'danger')
             elif db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', (username,)):
                 flash('Ese nombre de usuario ya existe.', 'danger')
             else:
                 db.execute(
-                    'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, parcela_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (username, generate_password_hash(password), role, nombre, activo, condominio_id, parcela_id)
+                    'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, ?, ?)',
+                    (username, generate_password_hash(password), role, nombre, activo, condominio_id)
                 )
                 db.commit()
                 flash('Usuario creado.', 'success')
                 return redirect(url_for('usuarios_list'))
-        return render_template('usuarios_form.html', usuario=None, roles=ALLOWED_ROLES, condominios=condominios, parcelas=parcelas_disponibles)
+        return render_template('usuarios_form.html', usuario=None, roles=ALLOWED_ROLES, condominios=condominios)
 
     @app.route('/usuarios/<int:user_id>/editar', methods=['GET', 'POST'])
     @role_required('admin')
     def usuarios_edit(user_id: int):
         db = get_db()
-        usuario = db.fetchone('SELECT id, username, role, nombre, activo, condominio_id, parcela_id FROM usuarios WHERE id=?', (user_id,))
+        usuario = db.fetchone('SELECT id, username, role, nombre, activo, condominio_id FROM usuarios WHERE id=?', (user_id,))
         if not usuario:
             flash('Usuario no encontrado.', 'danger')
             return redirect(url_for('usuarios_list'))
@@ -994,7 +985,6 @@ def create_app() -> Flask:
             flash('Solo puedes editar usuarios de tu propio condominio.', 'danger')
             return redirect(url_for('usuarios_list'))
         condominios = db.fetchall('SELECT id, nombre, activo FROM condominios WHERE activo = 1 ORDER BY nombre')
-        parcelas_disponibles = db.fetchall('SELECT id, nombre, curso, condominio_id FROM parcelas WHERE activo = 1 ORDER BY nombre') if current_user.is_global_admin() else db.fetchall('SELECT id, nombre, curso, condominio_id FROM parcelas WHERE activo = 1 AND condominio_id = ? ORDER BY nombre', (current_user.condominio_id,))
         if request.method == 'POST':
             nombre = request.form.get('nombre', '').strip()
             username = request.form.get('username', '').strip().lower()
@@ -1003,8 +993,6 @@ def create_app() -> Flask:
             activo = 1 if request.form.get('activo') == 'on' else 0
             condominio_raw = request.form.get('condominio_id', '').strip()
             condominio_id = int(condominio_raw) if condominio_raw.isdigit() else None
-            parcela_raw = request.form.get('parcela_id', '').strip()
-            parcela_id = int(parcela_raw) if parcela_raw.isdigit() else None
             if not current_user.is_global_admin():
                 condominio_id = int(current_user.condominio_id) if current_user.condominio_id else None
             if not nombre or not username:
@@ -1015,23 +1003,19 @@ def create_app() -> Flask:
                 flash('Solo puedes administrar usuarios de tu propio condominio.', 'danger')
             elif role != 'admin' and condominio_id is None:
                 flash('Debes asignar un condominio al usuario.', 'danger')
-            elif parcela_id and not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
-                flash('La parcela seleccionada no pertenece al condominio del usuario.', 'danger')
-            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND id <> ?', (parcela_id, user_id)):
-                flash('Esa parcela ya está vinculada a otro usuario.', 'danger')
             elif db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=? AND id<>?', (username, user_id)):
                 flash('Ese nombre de usuario ya existe.', 'danger')
             else:
                 if password:
-                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, password_hash=? WHERE id=?',
-                               (nombre, username, role, activo, condominio_id, parcela_id, generate_password_hash(password), user_id))
+                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, password_hash=? WHERE id=?',
+                               (nombre, username, role, activo, condominio_id, generate_password_hash(password), user_id))
                 else:
-                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=? WHERE id=?',
-                               (nombre, username, role, activo, condominio_id, parcela_id, user_id))
+                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=? WHERE id=?',
+                               (nombre, username, role, activo, condominio_id, user_id))
                 db.commit()
                 flash('Usuario actualizado.', 'success')
                 return redirect(url_for('usuarios_list'))
-        return render_template('usuarios_form.html', usuario=usuario, roles=ALLOWED_ROLES, condominios=condominios, parcelas=parcelas_disponibles)
+        return render_template('usuarios_form.html', usuario=usuario, roles=ALLOWED_ROLES, condominios=condominios)
 
     @app.post('/usuarios/<int:user_id>/eliminar')
     @role_required('admin')
@@ -1152,162 +1136,6 @@ def create_app() -> Flask:
         data = exportar_acta_pdf(acta)
         nombre = f"acta_{acta['fecha'] or 'sin_fecha'}_{acta_id}.pdf"
         return send_file(data, mimetype='application/pdf', as_attachment=True, download_name=nombre)
-
-    @app.get('/actas/<int:acta_id>/votaciones')
-    @login_required
-    def votaciones_list(acta_id: int):
-        db = get_db()
-        condominio_id = get_current_condominio_id(db)
-        acta = db.fetchone('SELECT id, titulo, fecha, estado FROM actas WHERE id = ? AND condominio_id = ?', (acta_id, condominio_id))
-        if not acta:
-            flash('Acta no encontrada.', 'danger')
-            return redirect(url_for('actas_list'))
-        votaciones = db.fetchall(
-            """
-            SELECT v.*, COUNT(DISTINCT vv.id) AS total_votos, COUNT(DISTINCT vo.id) AS total_opciones
-            FROM votaciones v
-            LEFT JOIN votacion_votos vv ON vv.votacion_id = v.id
-            LEFT JOIN votacion_opciones vo ON vo.votacion_id = v.id
-            WHERE v.acta_id = ? AND v.condominio_id = ?
-            GROUP BY v.id
-            ORDER BY v.id DESC
-            """,
-            (acta_id, condominio_id),
-        )
-        return render_template('votaciones_list.html', acta=acta, votaciones=votaciones)
-
-    @app.route('/actas/<int:acta_id>/votaciones/nueva', methods=['GET', 'POST'])
-    @role_required('admin', 'presidente', 'secretario')
-    def votacion_new(acta_id: int):
-        db = get_db()
-        condominio_id = get_current_condominio_id(db)
-        acta = db.fetchone('SELECT id, titulo, fecha FROM actas WHERE id = ? AND condominio_id = ?', (acta_id, condominio_id))
-        if not acta:
-            flash('Acta no encontrada.', 'danger')
-            return redirect(url_for('actas_list'))
-        if request.method == 'POST':
-            titulo = request.form.get('titulo', '').strip()
-            descripcion = request.form.get('descripcion', '').strip()
-            opciones_texto = [line.strip() for line in request.form.get('opciones', '').splitlines() if line.strip()]
-            if not titulo:
-                flash('Debes indicar el título de la votación.', 'danger')
-            elif len(opciones_texto) < 2:
-                flash('Debes ingresar al menos dos opciones, una por línea.', 'danger')
-            else:
-                cur = db.execute(
-                    'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (acta_id, titulo, descripcion, 'abierta', current_user.nombre, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
-                )
-                votacion_id = cur.lastrowid if hasattr(cur, 'lastrowid') else None
-                if votacion_id is None and db.kind == 'postgres':
-                    row = db.fetchone('SELECT MAX(id) AS id FROM votaciones WHERE condominio_id = ?', (condominio_id,))
-                    votacion_id = row['id'] if row else None
-                for idx, opcion in enumerate(opciones_texto, start=1):
-                    db.execute('INSERT INTO votacion_opciones (votacion_id, texto, orden, condominio_id) VALUES (?, ?, ?, ?)', (votacion_id, opcion, idx, condominio_id))
-                db.commit()
-                flash('Votación creada correctamente.', 'success')
-                return redirect(url_for('votaciones_list', acta_id=acta_id))
-        borrador = {'titulo': f"Votación de {acta['titulo']}", 'descripcion': '', 'opciones': 'Apruebo\nRechazo'}
-        return render_template('votacion_form.html', acta=acta, votacion=borrador)
-
-    @app.get('/votaciones/<int:votacion_id>')
-    @login_required
-    def votacion_detail(votacion_id: int):
-        db = get_db()
-        condominio_id = get_current_condominio_id(db)
-        votacion = db.fetchone(
-            """
-            SELECT v.*, a.titulo AS acta_titulo, a.id AS acta_id, a.fecha AS acta_fecha
-            FROM votaciones v
-            INNER JOIN actas a ON a.id = v.acta_id AND a.condominio_id = v.condominio_id
-            WHERE v.id = ? AND v.condominio_id = ?
-            """,
-            (votacion_id, condominio_id),
-        )
-        if not votacion:
-            flash('Votación no encontrada.', 'danger')
-            return redirect(url_for('actas_list'))
-        opciones = db.fetchall(
-            """
-            SELECT o.*, COUNT(v.id) AS total_votos
-            FROM votacion_opciones o
-            LEFT JOIN votacion_votos v ON v.opcion_id = o.id
-            WHERE o.votacion_id = ? AND o.condominio_id = ?
-            GROUP BY o.id
-            ORDER BY o.orden, o.id
-            """,
-            (votacion_id, condominio_id),
-        )
-        voto_usuario = db.fetchone(
-            """
-            SELECT vv.*, vo.texto AS opcion_texto
-            FROM votacion_votos vv
-            INNER JOIN votacion_opciones vo ON vo.id = vv.opcion_id
-            WHERE vv.votacion_id = ? AND vv.user_id = ?
-            """,
-            (votacion_id, int(current_user.id)),
-        )
-        historial = db.fetchall(
-            """
-            SELECT vv.created_at, u.nombre AS usuario_nombre, u.username, p.nombre AS parcela_nombre, vo.texto AS opcion_texto
-            FROM votacion_votos vv
-            INNER JOIN usuarios u ON u.id = vv.user_id
-            LEFT JOIN parcelas p ON p.id = vv.parcela_id
-            INNER JOIN votacion_opciones vo ON vo.id = vv.opcion_id
-            WHERE vv.votacion_id = ? AND vv.condominio_id = ?
-            ORDER BY vv.created_at DESC, vv.id DESC
-            """,
-            (votacion_id, condominio_id),
-        )
-        total_votos = sum(int(o['total_votos'] or 0) for o in opciones)
-        puede_votar = bool(getattr(current_user, 'parcela_id', None)) and votacion['estado'] == 'abierta' and voto_usuario is None
-        return render_template('votacion_detail.html', votacion=votacion, opciones=opciones, voto_usuario=voto_usuario, historial=historial, total_votos=total_votos, puede_votar=puede_votar)
-
-    @app.post('/votaciones/<int:votacion_id>/votar')
-    @login_required
-    def votacion_vote(votacion_id: int):
-        db = get_db()
-        condominio_id = get_current_condominio_id(db)
-        votacion = db.fetchone('SELECT * FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
-        if not votacion:
-            flash('Votación no encontrada.', 'danger')
-            return redirect(url_for('actas_list'))
-        if votacion['estado'] != 'abierta':
-            flash('La votación ya está cerrada.', 'warning')
-            return redirect(url_for('votacion_detail', votacion_id=votacion_id))
-        parcela_id = int(current_user.parcela_id) if getattr(current_user, 'parcela_id', None) else None
-        if not parcela_id:
-            flash('Tu usuario no tiene una parcela asignada, por lo que no puede votar.', 'danger')
-            return redirect(url_for('votacion_detail', votacion_id=votacion_id))
-        if db.fetchone('SELECT 1 FROM votacion_votos WHERE votacion_id = ? AND user_id = ?', (votacion_id, int(current_user.id))):
-            flash('Ya registraste tu voto en esta votación.', 'warning')
-            return redirect(url_for('votacion_detail', votacion_id=votacion_id))
-        opcion_raw = request.form.get('opcion_id', '').strip()
-        if not opcion_raw.isdigit():
-            flash('Debes seleccionar una opción válida.', 'danger')
-            return redirect(url_for('votacion_detail', votacion_id=votacion_id))
-        opcion = db.fetchone('SELECT id FROM votacion_opciones WHERE id = ? AND votacion_id = ? AND condominio_id = ?', (int(opcion_raw), votacion_id, condominio_id))
-        if not opcion:
-            flash('La opción seleccionada no pertenece a esta votación.', 'danger')
-            return redirect(url_for('votacion_detail', votacion_id=votacion_id))
-        db.execute('INSERT INTO votacion_votos (votacion_id, opcion_id, user_id, parcela_id, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?)', (votacion_id, int(opcion_raw), int(current_user.id), parcela_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id))
-        db.commit()
-        flash('Tu voto quedó registrado.', 'success')
-        return redirect(url_for('votacion_detail', votacion_id=votacion_id))
-
-    @app.post('/votaciones/<int:votacion_id>/cerrar')
-    @role_required('admin', 'presidente', 'secretario')
-    def votacion_close(votacion_id: int):
-        db = get_db()
-        condominio_id = get_current_condominio_id(db)
-        votacion = db.fetchone('SELECT id, acta_id FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
-        if not votacion:
-            flash('Votación no encontrada.', 'danger')
-            return redirect(url_for('actas_list'))
-        db.execute('UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?', ('cerrada', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), votacion_id, condominio_id))
-        db.commit()
-        flash('Votación cerrada. Los resultados quedan registrados en el sistema.', 'success')
-        return redirect(url_for('votacion_detail', votacion_id=votacion_id))
     @app.route('/parcelas', endpoint='parcelas_list')
     @app.route('/parcelas')
     @login_required
@@ -3022,46 +2850,7 @@ def init_db(db: DBAdapter) -> None:
             updated_at TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS votaciones (
-            id BIGSERIAL PRIMARY KEY,
-            acta_id BIGINT NOT NULL,
-            titulo TEXT NOT NULL,
-            descripcion TEXT,
-            estado TEXT NOT NULL DEFAULT 'abierta',
-            created_by TEXT,
-            created_at TEXT,
-            closed_at TEXT,
-            condominio_id BIGINT,
-            CONSTRAINT fk_votaciones_acta FOREIGN KEY (acta_id) REFERENCES actas(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS votacion_opciones (
-            id BIGSERIAL PRIMARY KEY,
-            votacion_id BIGINT NOT NULL,
-            texto TEXT NOT NULL,
-            orden INTEGER NOT NULL DEFAULT 1,
-            condominio_id BIGINT,
-            CONSTRAINT fk_votacion_opciones_votacion FOREIGN KEY (votacion_id) REFERENCES votaciones(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS votacion_votos (
-            id BIGSERIAL PRIMARY KEY,
-            votacion_id BIGINT NOT NULL,
-            opcion_id BIGINT NOT NULL,
-            user_id BIGINT NOT NULL,
-            parcela_id BIGINT,
-            created_at TEXT NOT NULL,
-            condominio_id BIGINT,
-            CONSTRAINT fk_votacion_votos_votacion FOREIGN KEY (votacion_id) REFERENCES votaciones(id),
-            CONSTRAINT fk_votacion_votos_opcion FOREIGN KEY (opcion_id) REFERENCES votacion_opciones(id),
-            CONSTRAINT fk_votacion_votos_user FOREIGN KEY (user_id) REFERENCES usuarios(id),
-            CONSTRAINT fk_votacion_votos_parcela FOREIGN KEY (parcela_id) REFERENCES parcelas(id),
-            CONSTRAINT uq_votacion_user UNIQUE (votacion_id, user_id)
-        );
-
         CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha);
-        CREATE INDEX IF NOT EXISTS idx_votaciones_acta ON votaciones(acta_id);
-        CREATE INDEX IF NOT EXISTS idx_votacion_votos_votacion ON votacion_votos(votacion_id);
         CREATE INDEX IF NOT EXISTS idx_pagos_parcelas_mes ON pagos_parcelas(mes);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_parcelas_nombre_curso_unique ON parcelas ((lower(trim(nombre))), (lower(trim(COALESCE(curso, '')))));
         CREATE UNIQUE INDEX IF NOT EXISTS idx_pagos_parcela_mes_unique ON pagos_parcelas(parcela_id, mes);
@@ -3147,46 +2936,7 @@ def init_db(db: DBAdapter) -> None:
             updated_at TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS votaciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            acta_id INTEGER NOT NULL,
-            titulo TEXT NOT NULL,
-            descripcion TEXT,
-            estado TEXT NOT NULL DEFAULT 'abierta',
-            created_by TEXT,
-            created_at TEXT,
-            closed_at TEXT,
-            condominio_id INTEGER,
-            FOREIGN KEY (acta_id) REFERENCES actas(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS votacion_opciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            votacion_id INTEGER NOT NULL,
-            texto TEXT NOT NULL,
-            orden INTEGER NOT NULL DEFAULT 1,
-            condominio_id INTEGER,
-            FOREIGN KEY (votacion_id) REFERENCES votaciones(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS votacion_votos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            votacion_id INTEGER NOT NULL,
-            opcion_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            parcela_id INTEGER,
-            created_at TEXT NOT NULL,
-            condominio_id INTEGER,
-            FOREIGN KEY (votacion_id) REFERENCES votaciones(id),
-            FOREIGN KEY (opcion_id) REFERENCES votacion_opciones(id),
-            FOREIGN KEY (user_id) REFERENCES usuarios(id),
-            FOREIGN KEY (parcela_id) REFERENCES parcelas(id),
-            UNIQUE (votacion_id, user_id)
-        );
-
         CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha);
-        CREATE INDEX IF NOT EXISTS idx_votaciones_acta ON votaciones(acta_id);
-        CREATE INDEX IF NOT EXISTS idx_votacion_votos_votacion ON votacion_votos(votacion_id);
         CREATE INDEX IF NOT EXISTS idx_pagos_parcelas_mes ON pagos_parcelas(mes);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_parcelas_nombre_curso_unique ON parcelas(lower(trim(nombre)), lower(trim(COALESCE(curso, ''))));
         CREATE UNIQUE INDEX IF NOT EXISTS idx_pagos_parcela_mes_unique ON pagos_parcelas(parcela_id, mes);
@@ -3213,8 +2963,6 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS direccion TEXT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS observacion_ficha TEXT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
-            'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
-            'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE movimientos ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE pagos_parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
@@ -3235,7 +2983,6 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE parcelas ADD COLUMN direccion TEXT',
             'ALTER TABLE parcelas ADD COLUMN observacion_ficha TEXT',
             'ALTER TABLE usuarios ADD COLUMN condominio_id INTEGER',
-            'ALTER TABLE usuarios ADD COLUMN parcela_id INTEGER',
             'ALTER TABLE parcelas ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE movimientos ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE pagos_parcelas ADD COLUMN condominio_id INTEGER',
@@ -3243,7 +2990,6 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE actividades ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE ciclos_cobranza ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
-            'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE movimientos ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE pagos_parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
@@ -3258,21 +3004,6 @@ def init_db(db: DBAdapter) -> None:
             db.rollback()
         try:
             db.execute("CREATE TABLE IF NOT EXISTS actas (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT NOT NULL, fecha TEXT NOT NULL, lugar TEXT, hora_inicio TEXT, hora_termino TEXT, asistentes TEXT, temas TEXT, desarrollo TEXT, acuerdos TEXT, responsables TEXT, observaciones TEXT, estado TEXT NOT NULL DEFAULT 'borrador', created_by TEXT, updated_at TEXT)")
-            db.commit()
-        except Exception:
-            db.rollback()
-        try:
-            db.execute("CREATE TABLE IF NOT EXISTS votaciones (id INTEGER PRIMARY KEY AUTOINCREMENT, acta_id INTEGER NOT NULL, titulo TEXT NOT NULL, descripcion TEXT, estado TEXT NOT NULL DEFAULT 'abierta', created_by TEXT, created_at TEXT, closed_at TEXT, condominio_id INTEGER)")
-            db.commit()
-        except Exception:
-            db.rollback()
-        try:
-            db.execute("CREATE TABLE IF NOT EXISTS votacion_opciones (id INTEGER PRIMARY KEY AUTOINCREMENT, votacion_id INTEGER NOT NULL, texto TEXT NOT NULL, orden INTEGER NOT NULL DEFAULT 1, condominio_id INTEGER)")
-            db.commit()
-        except Exception:
-            db.rollback()
-        try:
-            db.execute("CREATE TABLE IF NOT EXISTS votacion_votos (id INTEGER PRIMARY KEY AUTOINCREMENT, votacion_id INTEGER NOT NULL, opcion_id INTEGER NOT NULL, user_id INTEGER NOT NULL, parcela_id INTEGER, created_at TEXT NOT NULL, condominio_id INTEGER, UNIQUE(votacion_id, user_id))")
             db.commit()
         except Exception:
             db.rollback()

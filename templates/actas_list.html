@@ -39,6 +39,7 @@
             <td class="text-end">
               <div class="d-inline-flex gap-2 flex-wrap justify-content-end">
                 <a class="btn btn-sm btn-outline-dark" href="{{ url_for('actas_pdf', acta_id=a['id']) }}">PDF</a>
+                <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('votaciones_list', acta_id=a['id']) }}">Votaciones</a>
                 {% if current_user.can_manage_actas() %}
                 <a class="btn btn-sm btn-outline-primary" href="{{ url_for('actas_edit', acta_id=a['id']) }}">Editar</a>
                 <form method="post" action="{{ url_for('actas_duplicate', acta_id=a['id']) }}">
