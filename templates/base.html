@@ -105,6 +105,11 @@
       </nav>
     </div>
   {% endif %}
+  {% if current_user.is_authenticated and current_user.needs_password_change() %}
+    <div class="alert alert-warning border-0 shadow-sm mb-3" role="alert">
+      Debes crear una nueva contraseña antes de seguir usando el sistema.
+    </div>
+  {% endif %}
   {% if current_user.is_authenticated and current_user.is_demo_db %}
     <div class="alert alert-warning border-0 shadow-sm mb-3 demo-mode-banner" role="alert">
       🚧 Estás en modo DEMO — los datos son de ejemplo y están separados del entorno real.

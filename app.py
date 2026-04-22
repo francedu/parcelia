@@ -74,6 +74,7 @@ class User(UserMixin):
         self.condominio_nombre = row['condominio_nombre'] if 'condominio_nombre' in row.keys() else None
         self.parcela_id = row['parcela_id'] if 'parcela_id' in row.keys() else None
         self.is_demo_db = is_demo_db
+        self.must_change_password = bool(row['must_change_password']) if 'must_change_password' in row.keys() else False
 
 
     def get_id(self) -> str:
@@ -109,6 +110,9 @@ class User(UserMixin):
 
     def can_view_only(self) -> bool:
         return self.role == 'propietario'
+
+    def needs_password_change(self) -> bool:
+        return self.must_change_password
 
 
 class DBAdapter:
@@ -351,6 +355,11 @@ def create_app() -> Flask:
                 session.clear()
                 flash('Tu sesión expiró por inactividad.', 'warning')
                 return redirect(url_for('login', next=request.full_path if request.full_path.startswith('/') else request.path))
+            if getattr(current_user, 'needs_password_change', lambda: False)():
+                allowed_endpoints = {'first_login_password', 'logout', 'static'}
+                if request.endpoint not in allowed_endpoints:
+                    flash('Primero debes crear tu nueva contraseña para continuar.', 'warning')
+                    return redirect(url_for('first_login_password'))
             session['last_activity_ts'] = now_ts
 
     @app.after_request
@@ -663,8 +672,12 @@ def create_app() -> Flask:
             db = get_db()
             row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE lower(u.username) = ? AND u.activo = 1', (username,))
             if row and check_password_hash(row['password_hash'], password):
-                login_user(User(row, is_demo_db=is_demo_login), remember=not is_demo_login)
+                user = User(row, is_demo_db=is_demo_login)
+                login_user(user, remember=not is_demo_login)
                 session['last_activity_ts'] = int(datetime.now().timestamp())
+                if user.needs_password_change():
+                    flash('Debes crear una nueva contraseña para activar tu acceso.', 'warning')
+                    return redirect(url_for('first_login_password'))
                 flash(f'Bienvenido, {row["nombre"]}.', 'success')
                 next_url = request.form.get('next', '').strip() or request.args.get('next', '').strip()
                 return redirect_to_local_url(next_url, 'dashboard')
@@ -684,8 +697,12 @@ def create_app() -> Flask:
             session['db_mode'] = 'prod'
             flash('La cuenta demo aún no está disponible.', 'danger')
             return redirect(url_for('login'))
-        login_user(User(row, is_demo_db=True), remember=False)
+        user = User(row, is_demo_db=True)
+        login_user(user, remember=False)
         session['last_activity_ts'] = int(datetime.now().timestamp())
+        if user.needs_password_change():
+            flash('Debes crear una nueva contraseña para activar tu acceso.', 'warning')
+            return redirect(url_for('first_login_password'))
         flash('Entraste a la demo de Parcelia.', 'success')
         return redirect(url_for('dashboard'))
 
@@ -698,6 +715,36 @@ def create_app() -> Flask:
         session.pop('last_activity_ts', None)
         flash('Sesión cerrada.', 'success')
         return redirect(url_for('login'))
+
+    @app.route('/primer-acceso', methods=['GET', 'POST'])
+    @login_required
+    def first_login_password():
+        if not getattr(current_user, 'needs_password_change', lambda: False)():
+            return redirect(url_for('dashboard'))
+        if request.method == 'POST':
+            current_password = request.form.get('current_password', '')
+            new_password = request.form.get('new_password', '')
+            confirm_password = request.form.get('confirm_password', '')
+
+            if not check_password_hash(current_user.password_hash, current_password):
+                flash('La contraseña temporal actual no es correcta.', 'danger')
+            elif len(new_password) < 8:
+                flash('La nueva contraseña debe tener al menos 8 caracteres.', 'danger')
+            elif new_password != confirm_password:
+                flash('La confirmación no coincide con la nueva contraseña.', 'danger')
+            elif current_password == new_password:
+                flash('La nueva contraseña debe ser distinta a la temporal.', 'danger')
+            else:
+                db = get_db()
+                db.execute('UPDATE usuarios SET password_hash=?, must_change_password=0 WHERE id=?', (generate_password_hash(new_password), int(current_user.id.split(':')[-1]) if ':' in current_user.id else int(current_user.id)))
+                db.commit()
+                fresh_row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.id = ?', (int(current_user.id.split(':')[-1]) if ':' in current_user.id else int(current_user.id),))
+                if fresh_row:
+                    login_user(User(fresh_row, is_demo_db=getattr(current_user, 'is_demo_db', False)), remember=not getattr(current_user, 'is_demo_db', False), fresh=True)
+                session['last_activity_ts'] = int(datetime.now().timestamp())
+                flash('Tu nueva contraseña fue guardada. Ya puedes usar el sistema.', 'success')
+                return redirect(url_for('dashboard'))
+        return render_template('first_login_password.html')
 
     @app.get('/healthz')
     def healthz():
@@ -962,9 +1009,9 @@ def create_app() -> Flask:
     def usuarios_list():
         db = get_db()
         if current_user.is_global_admin():
-            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username")
+            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, u.must_change_password, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username")
         else:
-            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id WHERE u.condominio_id = ? ORDER BY u.nombre, u.username", (current_user.condominio_id,))
+            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, u.must_change_password, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id WHERE u.condominio_id = ? ORDER BY u.nombre, u.username", (current_user.condominio_id,))
         return render_template('usuarios_list.html', usuarios=usuarios)
 
     @app.route('/usuarios/nuevo', methods=['GET', 'POST'])
@@ -980,6 +1027,7 @@ def create_app() -> Flask:
             password = request.form.get('password', '')
             role = request.form.get('role', 'comite')
             activo = 1 if request.form.get('activo') == 'on' else 0
+            must_change_password = 1 if request.form.get('must_change_password') else 0
             condominio_raw = request.form.get('condominio_id', '').strip()
             condominio_id = int(condominio_raw) if condominio_raw.isdigit() else None
             parcela_raw = request.form.get('parcela_id', '').strip()
@@ -1005,8 +1053,8 @@ def create_app() -> Flask:
                 flash('Ese nombre de usuario ya existe.', 'danger')
             else:
                 db.execute(
-                    'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, parcela_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (username, generate_password_hash(password), role, nombre, activo, condominio_id, parcela_id)
+                    'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, parcela_id, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (username, generate_password_hash(password), role, nombre, activo, condominio_id, parcela_id, must_change_password)
                 )
                 db.commit()
                 flash('Usuario creado.', 'success')
@@ -1017,7 +1065,7 @@ def create_app() -> Flask:
     @role_required('admin')
     def usuarios_edit(user_id: int):
         db = get_db()
-        usuario = db.fetchone('SELECT id, username, role, nombre, activo, condominio_id, parcela_id FROM usuarios WHERE id=?', (user_id,))
+        usuario = db.fetchone('SELECT id, username, role, nombre, activo, condominio_id, parcela_id, must_change_password FROM usuarios WHERE id=?', (user_id,))
         if not usuario:
             flash('Usuario no encontrado.', 'danger')
             return redirect(url_for('usuarios_list'))
@@ -1032,6 +1080,7 @@ def create_app() -> Flask:
             password = request.form.get('password', '')
             role = request.form.get('role', 'comite')
             activo = 1 if request.form.get('activo') == 'on' else 0
+            must_change_password = 1 if request.form.get('must_change_password') else 0
             condominio_raw = request.form.get('condominio_id', '').strip()
             condominio_id = int(condominio_raw) if condominio_raw.isdigit() else None
             parcela_raw = request.form.get('parcela_id', '').strip()
@@ -1054,11 +1103,11 @@ def create_app() -> Flask:
                 flash('Ese nombre de usuario ya existe.', 'danger')
             else:
                 if password:
-                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, password_hash=? WHERE id=?',
-                               (nombre, username, role, activo, condominio_id, parcela_id, generate_password_hash(password), user_id))
+                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, password_hash=?, must_change_password=? WHERE id=?',
+                               (nombre, username, role, activo, condominio_id, parcela_id, generate_password_hash(password), must_change_password, user_id))
                 else:
-                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=? WHERE id=?',
-                               (nombre, username, role, activo, condominio_id, parcela_id, user_id))
+                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, must_change_password=? WHERE id=?',
+                               (nombre, username, role, activo, condominio_id, parcela_id, must_change_password, user_id))
                 db.commit()
                 flash('Usuario actualizado.', 'success')
                 return redirect(url_for('usuarios_list'))
@@ -2890,7 +2939,7 @@ def seed_default_admin(db: DBAdapter) -> None:
     password = os.environ.get('ADMIN_PASSWORD', 'admin123')
     nombre = os.environ.get('ADMIN_NAME', 'Administrador')
     db.execute(
-        'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, 1, NULL)',
+        'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, must_change_password) VALUES (?, ?, ?, ?, 1, NULL, 0)',
         (username, generate_password_hash(password), 'admin', nombre),
     )
     db.commit()
@@ -3106,12 +3155,12 @@ def seed_demo_environment(db: DBAdapter) -> None:
     # Usuario demo y usuario comité
     if not db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', ('demo@parcelia.cl',)):
         db.execute(
-            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, 1, ?)',
+            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, must_change_password) VALUES (?, ?, ?, ?, 1, ?, 0)',
             ('demo@parcelia.cl', generate_password_hash('123456'), 'admin', 'Demo Parcelia', condominio_ids['Parcelas Vista Campo (Demo)'])
         )
     if not db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', ('comite@parcelia.cl',)):
         db.execute(
-            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, 1, ?)',
+            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, must_change_password) VALUES (?, ?, ?, ?, 1, ?, 0)',
             ('comite@parcelia.cl', generate_password_hash('123456'), 'comite', 'Comité Parcelia', condominio_ids['Parcelas Vista Campo (Demo)'])
         )
 
@@ -3149,7 +3198,8 @@ def init_db(db: DBAdapter) -> None:
             telefono TEXT,
             direccion TEXT,
             observacion_ficha TEXT,
-            activo INTEGER NOT NULL DEFAULT 1
+            activo INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS pagos_parcelas (
@@ -3170,7 +3220,8 @@ def init_db(db: DBAdapter) -> None:
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL,
             nombre TEXT NOT NULL,
-            activo INTEGER NOT NULL DEFAULT 1
+            activo INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS ciclos_cobranza (
@@ -3392,6 +3443,7 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
+            'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS must_change_password INTEGER NOT NULL DEFAULT 0',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE movimientos ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE pagos_parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
@@ -3413,6 +3465,7 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE parcelas ADD COLUMN observacion_ficha TEXT',
             'ALTER TABLE usuarios ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE usuarios ADD COLUMN parcela_id INTEGER',
+            'ALTER TABLE usuarios ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0',
             'ALTER TABLE parcelas ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE movimientos ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE pagos_parcelas ADD COLUMN condominio_id INTEGER',
@@ -3465,10 +3518,11 @@ def init_db(db: DBAdapter) -> None:
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL,
                     nombre TEXT NOT NULL,
-                    activo INTEGER NOT NULL DEFAULT 1
+                    activo INTEGER NOT NULL DEFAULT 1,
+                    must_change_password INTEGER NOT NULL DEFAULT 0
                 );
-                INSERT INTO usuarios (id, username, password_hash, role, nombre, activo)
-                SELECT id, username, password_hash, CASE WHEN role='solo_lectura' THEN 'comite' ELSE role END, nombre, activo FROM usuarios_old;
+                INSERT INTO usuarios (id, username, password_hash, role, nombre, activo, must_change_password)
+                SELECT id, username, password_hash, CASE WHEN role='solo_lectura' THEN 'comite' ELSE role END, nombre, activo, 0 FROM usuarios_old;
                 DROP TABLE usuarios_old;
                 """)
                 db.commit()
