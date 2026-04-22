@@ -581,6 +581,12 @@ def create_app() -> Flask:
 
     @app.errorhandler(500)
     def internal_error(error):
+        try:
+            db = g.get('db')
+            if db:
+                db.rollback()
+        except Exception:
+            pass
         app.logger.exception('Error interno no controlado: %s', error)
         return render_template('error.html', error_code=500, error_title='Error interno', error_message='Ocurrió un problema inesperado. Intenta nuevamente en unos minutos.'), 500
 
@@ -1076,7 +1082,7 @@ def create_app() -> Flask:
         db = get_db()
         condominio_id = get_current_condominio_id(db)
         if request.method == 'POST':
-            payload = extraer_acta_form(request)
+            payload = extraer_acta_form(request, db)
             db.execute(
                 """
                 INSERT INTO actas (titulo, fecha, lugar, hora_inicio, hora_termino, asistentes, temas, desarrollo, acuerdos, responsables, observaciones, estado, created_by, updated_at, condominio_id)
@@ -1107,7 +1113,7 @@ def create_app() -> Flask:
             flash('Acta no encontrada.', 'danger')
             return redirect(url_for('actas_list'))
         if request.method == 'POST':
-            payload = extraer_acta_form(request)
+            payload = extraer_acta_form(request, db)
             db.execute(
                 """
                 UPDATE actas
@@ -1194,19 +1200,33 @@ def create_app() -> Flask:
             elif len(opciones_texto) < 2:
                 flash('Debes ingresar al menos dos opciones, una por línea.', 'danger')
             else:
-                cur = db.execute(
-                    'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (acta_id, titulo, descripcion, 'abierta', current_user.nombre, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
-                )
-                votacion_id = cur.lastrowid if hasattr(cur, 'lastrowid') else None
-                if votacion_id is None and db.kind == 'postgres':
-                    row = db.fetchone('SELECT MAX(id) AS id FROM votaciones WHERE condominio_id = ?', (condominio_id,))
-                    votacion_id = row['id'] if row else None
-                for idx, opcion in enumerate(opciones_texto, start=1):
-                    db.execute('INSERT INTO votacion_opciones (votacion_id, texto, orden, condominio_id) VALUES (?, ?, ?, ?)', (votacion_id, opcion, idx, condominio_id))
-                db.commit()
-                flash('Votación creada correctamente.', 'success')
-                return redirect(url_for('votaciones_list', acta_id=acta_id))
+                try:
+                    if db.kind == 'postgres':
+                        cur = db.execute(
+                            'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
+                            (acta_id, titulo, descripcion, 'abierta', current_user.nombre, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+                        )
+                        row = cur.fetchone()
+                        votacion_id = row['id'] if row else None
+                    else:
+                        cur = db.execute(
+                            'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                            (acta_id, titulo, descripcion, 'abierta', current_user.nombre, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+                        )
+                        votacion_id = cur.lastrowid
+
+                    if not votacion_id:
+                        raise ValueError('No se pudo obtener el id de la votación creada.')
+
+                    for idx, opcion in enumerate(opciones_texto, start=1):
+                        db.execute('INSERT INTO votacion_opciones (votacion_id, texto, orden, condominio_id) VALUES (?, ?, ?, ?)', (votacion_id, opcion, idx, condominio_id))
+                    db.commit()
+                    flash('Votación creada correctamente.', 'success')
+                    return redirect(url_for('votaciones_list', acta_id=acta_id))
+                except Exception as e:
+                    db.rollback()
+                    app.logger.exception('Error creando votación')
+                    flash(f'Error al crear la votación: {e}', 'danger')
         borrador = {'titulo': f"Votación de {acta['titulo']}", 'descripcion': '', 'opciones': 'Apruebo\nRechazo'}
         return render_template('votacion_form.html', acta=acta, votacion=borrador)
 
@@ -2085,9 +2105,11 @@ def obtener_movimientos_filtrados(db: DBAdapter, tipo: str = 'Todos', mes: str =
     return db.fetchall(sql, params)
 
 
-def extraer_acta_form(request):
+def extraer_acta_form(request, db):
+    condominio = get_current_condominio(db)
+    nombre_condominio = condominio['nombre'] if condominio else 'Condominio'
     return {
-        'titulo': request.form.get('titulo', '').strip() or f"Acta Asamblea {get_current_condominio(db)['nombre'] if get_current_condominio(db) else 'Condominio'}",
+        'titulo': request.form.get('titulo', '').strip() or f"Acta Asamblea {nombre_condominio}",
         'fecha': request.form.get('fecha', '').strip() or datetime.today().strftime('%Y-%m-%d'),
         'lugar': request.form.get('lugar', '').strip(),
         'hora_inicio': request.form.get('hora_inicio', '').strip(),
