@@ -50,7 +50,7 @@ BACKUP_DIR.mkdir(exist_ok=True)
 SCHOOL_NAME = 'Parcelia'
 SCHOOL_LOCATION = 'Administración de parcelas en condominios'
 DEFAULT_CONDOMINIO_NAME = 'Condominio Base'
-ALLOWED_ROLES = ('admin', 'presidente', 'tesorero', 'secretario', 'comite')
+ALLOWED_ROLES = ('admin', 'presidente', 'tesorero', 'secretario', 'comite', 'propietario')
 ACTA_ESTADOS = ('borrador', 'en_revision', 'aprobada')
 ROLE_LABELS = {
     'admin': 'Administrador',
@@ -58,6 +58,7 @@ ROLE_LABELS = {
     'tesorero': 'Tesorero',
     'secretario': 'Secretario',
     'comite': 'Comité',
+    'propietario': 'Propietario',
 }
 
 
@@ -105,6 +106,9 @@ class User(UserMixin):
     @property
     def role_label(self) -> str:
         return ROLE_LABELS.get(self.role, self.role.title())
+
+    def can_view_only(self) -> bool:
+        return self.role == 'propietario'
 
 
 class DBAdapter:
@@ -1159,6 +1163,42 @@ def create_app() -> Flask:
         nombre = f"acta_{acta['fecha'] or 'sin_fecha'}_{acta_id}.pdf"
         return send_file(data, mimetype='application/pdf', as_attachment=True, download_name=nombre)
 
+
+
+    def resolver_estado_votacion(opciones: list[dict[str, Any]], total_votos: int) -> str:
+        if total_votos <= 0:
+            return 'cerrada'
+        ordenadas = sorted(
+            opciones,
+            key=lambda item: (int(item['total_votos'] or 0), -int(item['orden'] or 0), -int(item['id'])),
+            reverse=True,
+        )
+        if len(ordenadas) >= 2 and int(ordenadas[0]['total_votos'] or 0) == int(ordenadas[1]['total_votos'] or 0):
+            return 'cerrada'
+        ganadora = (ordenadas[0].get('texto') or '').strip().lower()
+        ganadora_norm = ganadora.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
+        if ganadora_norm in ('apruebo', 'aprobado', 'aprobada', 'si', 'sí') or 'aprueb' in ganadora_norm:
+            return 'aprobada'
+        if ganadora_norm in ('rechazo', 'rechazada', 'rechazado', 'no') or 'rechaz' in ganadora_norm:
+            return 'rechazada'
+        return 'cerrada'
+
+    def calcular_resumen_votacion(db, votacion_id: int, condominio_id: int):
+        opciones = db.fetchall(
+            """
+            SELECT o.id, o.texto, o.orden, COUNT(v.id) AS total_votos
+            FROM votacion_opciones o
+            LEFT JOIN votacion_votos v ON v.opcion_id = o.id
+            WHERE o.votacion_id = ? AND o.condominio_id = ?
+            GROUP BY o.id
+            ORDER BY o.orden, o.id
+            """,
+            (votacion_id, condominio_id),
+        )
+        total_votos = sum(int(o['total_votos'] or 0) for o in opciones)
+        estado_resuelto = resolver_estado_votacion(opciones, total_votos)
+        return opciones, total_votos, estado_resuelto
+
     @app.get('/actas/<int:acta_id>/votaciones')
     @login_required
     def votaciones_list(acta_id: int):
@@ -1281,7 +1321,8 @@ def create_app() -> Flask:
         )
         total_votos = sum(int(o['total_votos'] or 0) for o in opciones)
         puede_votar = bool(getattr(current_user, 'parcela_id', None)) and votacion['estado'] == 'abierta' and voto_usuario is None
-        return render_template('votacion_detail.html', votacion=votacion, opciones=opciones, voto_usuario=voto_usuario, historial=historial, total_votos=total_votos, puede_votar=puede_votar)
+        estado_resultado = resolver_estado_votacion(opciones, total_votos) if votacion['estado'] != 'abierta' else 'abierta'
+        return render_template('votacion_detail.html', votacion=votacion, opciones=opciones, voto_usuario=voto_usuario, historial=historial, total_votos=total_votos, puede_votar=puede_votar, estado_resultado=estado_resultado)
 
     @app.post('/votaciones/<int:votacion_id>/votar')
     @login_required
@@ -1324,9 +1365,16 @@ def create_app() -> Flask:
         if not votacion:
             flash('Votación no encontrada.', 'danger')
             return redirect(url_for('actas_list'))
-        db.execute('UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?', ('cerrada', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), votacion_id, condominio_id))
+        _, _, estado_resuelto = calcular_resumen_votacion(db, votacion_id, condominio_id)
+        db.execute('UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?', (estado_resuelto, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), votacion_id, condominio_id))
         db.commit()
-        flash('Votación cerrada. Los resultados quedan registrados en el sistema.', 'success')
+        if estado_resuelto == 'aprobada':
+            mensaje = 'Votación cerrada como aprobada.'
+        elif estado_resuelto == 'rechazada':
+            mensaje = 'Votación cerrada como rechazada.'
+        else:
+            mensaje = 'Votación cerrada. No fue posible resolverla como aprobada o rechazada.'
+        flash(mensaje, 'success')
         return redirect(url_for('votacion_detail', votacion_id=votacion_id))
     @app.route('/parcelas', endpoint='parcelas_list')
     @app.route('/parcelas')

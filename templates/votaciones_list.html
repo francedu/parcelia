@@ -20,7 +20,7 @@
         {% for v in votaciones %}
           <tr>
             <td><div class="fw-semibold">{{ v['titulo'] }}</div><small class="text-muted">{{ v['descripcion'] or 'Sin descripción' }}</small></td>
-            <td><span class="badge text-bg-{% if v['estado']=='cerrada' %}secondary{% else %}success{% endif %}">{{ v['estado'] }}</span></td>
+            <td><span class="badge text-bg-{% if v['estado']=='aprobada' %}success{% elif v['estado']=='rechazada' %}danger{% elif v['estado']=='cerrada' %}secondary{% else %}warning text-dark{% endif %}">{{ v['estado']|capitalize }}</span></td>
             <td>{{ v['total_opciones'] }}</td>
             <td>{{ v['total_votos'] }}</td>
             <td>{{ v['created_at'] or '-' }}</td>

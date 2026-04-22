@@ -15,8 +15,9 @@
   <div class="col-lg-5">
     <div class="card shadow-sm h-100">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center mb-3"><span class="badge text-bg-{% if votacion['estado']=='cerrada' %}secondary{% else %}success{% endif %}">{{ votacion['estado'] }}</span><span class="text-muted">Total votos: {{ total_votos }}</span></div>
+        <div class="d-flex justify-content-between align-items-center mb-3"><span class="badge text-bg-{% if estado_resultado=='aprobada' %}success{% elif estado_resultado=='rechazada' %}danger{% elif estado_resultado=='cerrada' %}secondary{% else %}warning text-dark{% endif %}">{{ estado_resultado|capitalize }}</span><span class="text-muted">Total votos: {{ total_votos }}</span></div>
         {% if votacion['descripcion'] %}<p>{{ votacion['descripcion'] }}</p>{% endif %}
+        {% if estado_resultado == 'aprobada' %}<div class="alert alert-success">Resultado final: la votación fue <strong>aprobada</strong>.</div>{% elif estado_resultado == 'rechazada' %}<div class="alert alert-danger">Resultado final: la votación fue <strong>rechazada</strong>.</div>{% elif estado_resultado == 'cerrada' and votacion['estado'] != 'abierta' %}<div class="alert alert-secondary">La votación está cerrada sin resultado concluyente de aprobación o rechazo.</div>{% endif %}
         {% if voto_usuario %}
           <div class="alert alert-success">Tu voto ya fue registrado: <strong>{{ voto_usuario['opcion_texto'] }}</strong>.</div>
         {% elif puede_votar %}
@@ -45,10 +46,10 @@
         <h2 class="h5">Resultados</h2>
         <div class="table-responsive">
           <table class="table align-middle mb-0">
-            <thead><tr><th>Opción</th><th class="text-end">Votos</th></tr></thead>
+            <thead><tr><th>Opción</th><th class="text-end">Votos</th><th class="text-end">%</th></tr></thead>
             <tbody>
             {% for opcion in opciones %}
-              <tr><td>{{ opcion['texto'] }}</td><td class="text-end">{{ opcion['total_votos'] }}</td></tr>
+              <tr><td>{{ opcion['texto'] }}</td><td class="text-end">{{ opcion['total_votos'] }}</td><td class="text-end">{{ '%.1f'|format((opcion['total_votos'] / total_votos * 100) if total_votos else 0) }}%</td></tr>
             {% endfor %}
             </tbody>
           </table>
