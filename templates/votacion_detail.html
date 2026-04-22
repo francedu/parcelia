@@ -6,9 +6,11 @@
     <h1 class="h3 mb-0">{{ votacion['titulo'] }}</h1>
     <p class="text-muted mb-0">Acta: {{ votacion['acta_titulo'] }} · {{ votacion['acta_fecha'] }}</p>
   </div>
-  <div class="d-flex gap-2">
+  <div class="d-flex gap-2 flex-wrap">
     <a class="btn btn-outline-secondary" href="{{ url_for('votaciones_list', acta_id=votacion['acta_id']) }}">Volver</a>
+    {% if current_user.can_manage_actas() %}<a class="btn btn-outline-secondary" href="{{ url_for('votacion_edit', votacion_id=votacion['id']) }}">Editar</a>{% endif %}
     {% if current_user.can_manage_actas() and votacion['estado'] == 'abierta' %}<form method="post" action="{{ url_for('votacion_close', votacion_id=votacion['id']) }}"><input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-danger">Cerrar votación</button></form>{% endif %}
+    {% if current_user.can_manage_actas() %}<form method="post" action="{{ url_for('votacion_delete', votacion_id=votacion['id']) }}" onsubmit="return confirm('¿Eliminar esta votación? Esta acción no se puede deshacer.');"><input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="btn btn-danger">Eliminar</button></form>{% endif %}
   </div>
 </div>
 <div class="row g-3">

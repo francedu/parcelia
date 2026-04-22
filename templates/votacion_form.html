@@ -1,17 +1,18 @@
 {% extends "base.html" %}
-{% block title %}Nueva votación{% endblock %}
+{% block title %}{% if modo == "editar" %}Editar votación{% else %}Nueva votación{% endif %}{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">Nueva votación</h1>
+<h1 class="h3 mb-3">{% if modo == "editar" %}Editar votación{% else %}Nueva votación{% endif %}</h1>
 <div class="card shadow-sm">
   <div class="card-body">
     <div class="mb-3 text-muted">Acta: <strong>{{ acta['titulo'] }}</strong> · {{ acta['fecha'] }}</div>
     <form method="post" class="row g-3">
+      {% if modo == "editar" and tiene_votos %}<div class="col-12"><div class="alert alert-warning mb-0">Esta votación ya tiene votos registrados. Puedes editar el título y la descripción, pero no las opciones.</div></div>{% endif %}
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <div class="col-12"><label class="form-label">Título</label><input class="form-control" name="titulo" value="{{ votacion['titulo'] }}" required></div>
       <div class="col-12"><label class="form-label">Descripción</label><textarea class="form-control" name="descripcion" rows="3">{{ votacion['descripcion'] }}</textarea></div>
-      <div class="col-12"><label class="form-label">Opciones</label><textarea class="form-control" name="opciones" rows="6" required>{{ votacion['opciones'] }}</textarea><div class="form-text">Escribe una opción por línea. Ejemplo: Apruebo / Rechazo / Abstención.</div></div>
+      <div class="col-12"><label class="form-label">Opciones</label><textarea class="form-control" name="opciones" rows="6" required {% if modo == "editar" and tiene_votos %}disabled{% endif %}>{{ votacion['opciones'] }}</textarea>{% if modo == "editar" and tiene_votos %}<input type="hidden" name="opciones" value="{{ votacion['opciones'] }}">{% endif %}<div class="form-text">Escribe una opción por línea. Ejemplo: Apruebo / Rechazo / Abstención.</div></div>
       <div class="col-12 d-flex gap-2">
-        <button class="btn btn-primary">Crear votación</button>
+        <button class="btn btn-primary">{% if modo == "editar" %}Guardar cambios{% else %}Crear votación{% endif %}</button>
         <a class="btn btn-outline-secondary" href="{{ url_for('votaciones_list', acta_id=acta['id']) }}">Cancelar</a>
       </div>
     </form>

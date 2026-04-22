@@ -1376,6 +1376,92 @@ def create_app() -> Flask:
             mensaje = 'Votación cerrada. No fue posible resolverla como aprobada o rechazada.'
         flash(mensaje, 'success')
         return redirect(url_for('votacion_detail', votacion_id=votacion_id))
+
+
+    @app.route('/votaciones/<int:votacion_id>/editar', methods=['GET', 'POST'])
+    @role_required('admin', 'presidente', 'secretario')
+    def votacion_edit(votacion_id: int):
+        db = get_db()
+        condominio_id = get_current_condominio_id(db)
+        votacion = db.fetchone(
+            """
+            SELECT v.*, a.titulo AS acta_titulo, a.fecha AS acta_fecha
+            FROM votaciones v
+            INNER JOIN actas a ON a.id = v.acta_id AND a.condominio_id = v.condominio_id
+            WHERE v.id = ? AND v.condominio_id = ?
+            """,
+            (votacion_id, condominio_id),
+        )
+        if not votacion:
+            flash('Votación no encontrada.', 'danger')
+            return redirect(url_for('actas_list'))
+
+        opciones_actuales = db.fetchall(
+            'SELECT id, texto, orden FROM votacion_opciones WHERE votacion_id = ? AND condominio_id = ? ORDER BY orden, id',
+            (votacion_id, condominio_id),
+        )
+        tiene_votos = bool(db.fetchone('SELECT 1 FROM votacion_votos WHERE votacion_id = ? AND condominio_id = ? LIMIT 1', (votacion_id, condominio_id)))
+
+        if request.method == 'POST':
+            titulo = request.form.get('titulo', '').strip()
+            descripcion = request.form.get('descripcion', '').strip()
+            opciones_texto = [line.strip() for line in request.form.get('opciones', '').splitlines() if line.strip()]
+            if not titulo:
+                flash('Debes indicar el título de la votación.', 'danger')
+            elif not tiene_votos and len(opciones_texto) < 2:
+                flash('Debes ingresar al menos dos opciones, una por línea.', 'danger')
+            else:
+                try:
+                    db.execute(
+                        'UPDATE votaciones SET titulo = ?, descripcion = ? WHERE id = ? AND condominio_id = ?',
+                        (titulo, descripcion, votacion_id, condominio_id),
+                    )
+                    if not tiene_votos:
+                        db.execute('DELETE FROM votacion_opciones WHERE votacion_id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+                        for idx, opcion in enumerate(opciones_texto, start=1):
+                            db.execute(
+                                'INSERT INTO votacion_opciones (votacion_id, texto, orden, condominio_id) VALUES (?, ?, ?, ?)',
+                                (votacion_id, opcion, idx, condominio_id),
+                            )
+                    db.commit()
+                    if tiene_votos:
+                        flash('Votación actualizada. Las opciones no se modificaron porque ya tiene votos registrados.', 'success')
+                    else:
+                        flash('Votación actualizada correctamente.', 'success')
+                    return redirect(url_for('votacion_detail', votacion_id=votacion_id))
+                except Exception as e:
+                    db.rollback()
+                    app.logger.exception('Error editando votación')
+                    flash(f'Error al editar la votación: {e}', 'danger')
+
+        votacion_form = {
+            'titulo': request.form.get('titulo', votacion['titulo']) if request.method == 'POST' else votacion['titulo'],
+            'descripcion': request.form.get('descripcion', votacion['descripcion'] or '') if request.method == 'POST' else (votacion['descripcion'] or ''),
+            'opciones': request.form.get('opciones', '\n'.join(o['texto'] for o in opciones_actuales)) if request.method == 'POST' else '\n'.join(o['texto'] for o in opciones_actuales),
+        }
+        acta = {'id': votacion['acta_id'], 'titulo': votacion['acta_titulo'], 'fecha': votacion['acta_fecha']}
+        return render_template('votacion_form.html', acta=acta, votacion=votacion_form, modo='editar', tiene_votos=tiene_votos, votacion_id=votacion_id)
+
+    @app.post('/votaciones/<int:votacion_id>/eliminar')
+    @role_required('admin', 'presidente', 'secretario')
+    def votacion_delete(votacion_id: int):
+        db = get_db()
+        condominio_id = get_current_condominio_id(db)
+        votacion = db.fetchone('SELECT id, acta_id, titulo FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+        if not votacion:
+            flash('Votación no encontrada.', 'danger')
+            return redirect(url_for('actas_list'))
+        try:
+            db.execute('DELETE FROM votacion_votos WHERE votacion_id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+            db.execute('DELETE FROM votacion_opciones WHERE votacion_id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+            db.execute('DELETE FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+            db.commit()
+            flash(f"Votación '{votacion['titulo']}' eliminada correctamente.", 'success')
+        except Exception as e:
+            db.rollback()
+            app.logger.exception('Error eliminando votación')
+            flash(f'Error al eliminar la votación: {e}', 'danger')
+        return redirect(url_for('votaciones_list', acta_id=votacion['acta_id']))
     @app.route('/parcelas', endpoint='parcelas_list')
     @app.route('/parcelas')
     @login_required

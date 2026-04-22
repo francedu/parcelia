@@ -24,7 +24,7 @@
             <td>{{ v['total_opciones'] }}</td>
             <td>{{ v['total_votos'] }}</td>
             <td>{{ v['created_at'] or '-' }}</td>
-            <td class="text-end"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('votacion_detail', votacion_id=v['id']) }}">Ver detalle</a></td>
+            <td class="text-end"><div class="d-flex justify-content-end gap-2 flex-wrap"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('votacion_detail', votacion_id=v['id']) }}">Ver detalle</a>{% if current_user.can_manage_actas() %}<a class="btn btn-sm btn-outline-secondary" href="{{ url_for('votacion_edit', votacion_id=v['id']) }}">Editar</a><form method="post" action="{{ url_for('votacion_delete', votacion_id=v['id']) }}" onsubmit="return confirm('¿Eliminar esta votación? Esta acción no se puede deshacer.');"><input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-outline-danger">Eliminar</button></form>{% endif %}</div></td>
           </tr>
         {% else %}
           <tr><td colspan="6" class="text-center py-4 text-muted">Todavía no hay votaciones asociadas a esta acta.</td></tr>
