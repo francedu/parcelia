@@ -105,6 +105,11 @@
       </nav>
     </div>
   {% endif %}
+  {% if current_user.is_authenticated and current_user.needs_password_change() %}
+    <div class="alert alert-warning border-0 shadow-sm mb-3" role="alert">
+      Debes crear una nueva contraseña antes de seguir usando el sistema.
+    </div>
+  {% endif %}
   {% if current_user.is_authenticated and current_user.is_demo_db %}
     <div class="alert alert-warning border-0 shadow-sm mb-3 demo-mode-banner" role="alert">
       🚧 Estás en modo DEMO — los datos son de ejemplo y están separados del entorno real.
@@ -136,6 +141,22 @@ document.querySelectorAll('[data-autodismiss="true"]').forEach((el) => {
 });
 
 window.addEventListener('DOMContentLoaded', () => {
+  const inactivityTimeoutSeconds = Number({{ inactivity_timeout_seconds|default(0)|int }});
+  if (inactivityTimeoutSeconds > 0 && document.body.classList.contains('app-theme')) {
+    let inactivityTimer = null;
+    const logoutUrl = {{ url_for('logout')|tojson }};
+    const resetInactivityTimer = () => {
+      if (inactivityTimer) window.clearTimeout(inactivityTimer);
+      inactivityTimer = window.setTimeout(() => {
+        window.location.href = logoutUrl;
+      }, inactivityTimeoutSeconds * 1000);
+    };
+    ['click', 'mousemove', 'keydown', 'scroll', 'touchstart'].forEach((eventName) => {
+      window.addEventListener(eventName, resetInactivityTimer, { passive: true });
+    });
+    resetInactivityTimer();
+  }
+
   document.querySelectorAll('[data-table-filter]').forEach((input) => {
     const target = document.querySelector(input.dataset.tableFilter);
     if (!target) return;

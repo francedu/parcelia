@@ -110,3 +110,42 @@ http://IP-DE-TU-MAC:5001
 - respaldo compatible con ambos motores
 
 - En local o pruebas por HTTP, deja `SESSION_COOKIE_SECURE=0` o usa `APP_ENV=development` para que login, formularios y demo funcionen correctamente sin HTTPS.
+
+
+## API móvil básica
+
+El proyecto ahora incluye una API JSON para una futura app móvil, sincronizada con la misma base de datos que la web.
+
+### Endpoints disponibles
+
+- `GET /api/health`
+- `POST /api/auth/login`
+- `GET /api/me`
+- `POST /api/auth/change-password`
+- `GET /api/dashboard`
+- `GET /api/parcelas`
+- `GET /api/movimientos`
+
+### Login
+
+```bash
+curl -X POST https://TU-APP.onrender.com/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"demo@parcelia.cl","password":"123456","mode":"demo"}'
+```
+
+La respuesta entrega un token tipo Bearer. Luego úsalo así:
+
+```bash
+curl https://TU-APP.onrender.com/api/me \
+  -H "Authorization: Bearer TU_TOKEN"
+```
+
+### Variables útiles
+
+- `API_TOKEN_MAX_AGE_SECONDS` → duración del token, por defecto 7 días
+- `API_ALLOWED_ORIGINS` → orígenes permitidos para CORS, por defecto `*`
+
+### Nota
+
+La API reutiliza la misma lógica de usuarios, roles y base PostgreSQL. La app móvil debe consumir la API por HTTPS; no debe conectarse directo a PostgreSQL.

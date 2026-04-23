@@ -9,6 +9,7 @@ import subprocess
 import ssl
 from datetime import datetime, timedelta
 from functools import wraps
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -74,6 +75,7 @@ class User(UserMixin):
         self.condominio_nombre = row['condominio_nombre'] if 'condominio_nombre' in row.keys() else None
         self.parcela_id = row['parcela_id'] if 'parcela_id' in row.keys() else None
         self.is_demo_db = is_demo_db
+        self.must_change_password = bool(row['must_change_password']) if 'must_change_password' in row.keys() else False
 
 
     def get_id(self) -> str:
@@ -109,6 +111,9 @@ class User(UserMixin):
 
     def can_view_only(self) -> bool:
         return self.role == 'propietario'
+
+    def needs_password_change(self) -> bool:
+        return self.must_change_password
 
 
 class DBAdapter:
@@ -298,8 +303,13 @@ def create_app() -> Flask:
     app.config['REMEMBER_COOKIE_SECURE'] = remember_secure
     app.config['REMEMBER_COOKIE_HTTPONLY'] = True
     app.config['REMEMBER_COOKIE_SAMESITE'] = os.environ.get('REMEMBER_COOKIE_SAMESITE', 'Lax')
-    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=int(os.environ.get('SESSION_LIFETIME_HOURS', '12')))
+    session_lifetime_minutes = int(os.environ.get('SESSION_LIFETIME_MINUTES', '720'))
+    inactivity_timeout_minutes = int(os.environ.get('INACTIVITY_TIMEOUT_MINUTES', '15'))
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=session_lifetime_minutes)
+    app.config['INACTIVITY_TIMEOUT_SECONDS'] = inactivity_timeout_minutes * 60
     app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH_MB', '16')) * 1024 * 1024
+    app.config['API_TOKEN_MAX_AGE_SECONDS'] = int(os.environ.get('API_TOKEN_MAX_AGE_SECONDS', str(60 * 60 * 24 * 7)))
+    app.config['API_ALLOWED_ORIGINS'] = [o.strip() for o in os.environ.get('API_ALLOWED_ORIGINS', '*').split(',') if o.strip()]
 
     if os.environ.get('TRUST_PROXY', '1') == '1':
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -310,6 +320,21 @@ def create_app() -> Flask:
     login_manager.login_message_category = 'warning'
     login_manager.init_app(app)
 
+    def api_serializer() -> URLSafeTimedSerializer:
+        return URLSafeTimedSerializer(app.config['SECRET_KEY'], salt='parcelia-mobile-api')
+
+    def generate_api_token(user: User) -> str:
+        return api_serializer().dumps({
+            'uid': int(user.id.split(':')[-1]) if ':' in user.id else int(user.id),
+            'mode': 'demo' if getattr(user, 'is_demo_db', False) else 'prod',
+            'role': user.role,
+        })
+
+    def decode_api_token(token: str) -> dict[str, Any]:
+        max_age = int(app.config.get('API_TOKEN_MAX_AGE_SECONDS', 0) or 0)
+        kwargs = {'max_age': max_age} if max_age > 0 else {}
+        return api_serializer().loads(token, **kwargs)
+
     def generate_csrf_token() -> str:
         token = session.get('_csrf_token')
         if not token:
@@ -318,6 +343,8 @@ def create_app() -> Flask:
         return token
 
     def validate_csrf() -> None:
+        if request.path.startswith('/api/'):
+            return
         if request.method in {'GET', 'HEAD', 'OPTIONS', 'TRACE'}:
             return
         provided_token = (
@@ -335,6 +362,25 @@ def create_app() -> Flask:
             validate_csrf()
         if current_user.is_authenticated:
             session.permanent = True
+            now_ts = int(datetime.now().timestamp())
+            last_activity_ts = int(session.get('last_activity_ts', now_ts) or now_ts)
+            inactivity_timeout = int(app.config.get('INACTIVITY_TIMEOUT_SECONDS', 0) or 0)
+            ignored_endpoints = {'static', 'login', 'logout', 'healthz'}
+            if (
+                inactivity_timeout > 0
+                and request.endpoint not in ignored_endpoints
+                and now_ts - last_activity_ts > inactivity_timeout
+            ):
+                logout_user()
+                session.clear()
+                flash('Tu sesión expiró por inactividad.', 'warning')
+                return redirect(url_for('login', next=request.full_path if request.full_path.startswith('/') else request.path))
+            if getattr(current_user, 'needs_password_change', lambda: False)():
+                allowed_endpoints = {'first_login_password', 'logout', 'static'}
+                if request.endpoint not in allowed_endpoints:
+                    flash('Primero debes crear tu nueva contraseña para continuar.', 'warning')
+                    return redirect(url_for('first_login_password'))
+            session['last_activity_ts'] = now_ts
 
     @app.after_request
     def set_security_headers(response):
@@ -368,6 +414,8 @@ def create_app() -> Flask:
 
     @login_manager.unauthorized_handler
     def unauthorized():
+        if request.path.startswith('/api/'):
+            return {'ok': False, 'error': 'auth_required', 'message': 'Debes autenticarte para usar la API.'}, 401
         flash('Inicia sesión para continuar.', 'warning')
         return redirect(url_for('login', next=request.full_path if request.full_path.startswith('/') else request.path))
 
@@ -389,6 +437,7 @@ def create_app() -> Flask:
             'current_condominio': condominio_actual,
             'active_condominio_id': get_current_condominio_id(db),
             'admin_condominios': db.fetchall('SELECT id, nombre, activo FROM condominios ORDER BY nombre') if getattr(current_user, 'is_authenticated', False) and getattr(current_user, 'is_global_admin', lambda: False)() else [],
+            'inactivity_timeout_seconds': int(app.config.get('INACTIVITY_TIMEOUT_SECONDS', 0) or 0),
         }
 
     def get_database_url_for_request() -> str:
@@ -645,7 +694,12 @@ def create_app() -> Flask:
             db = get_db()
             row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE lower(u.username) = ? AND u.activo = 1', (username,))
             if row and check_password_hash(row['password_hash'], password):
-                login_user(User(row, is_demo_db=is_demo_login), remember=not is_demo_login)
+                user = User(row, is_demo_db=is_demo_login)
+                login_user(user, remember=not is_demo_login)
+                session['last_activity_ts'] = int(datetime.now().timestamp())
+                if user.needs_password_change():
+                    flash('Debes crear una nueva contraseña para activar tu acceso.', 'warning')
+                    return redirect(url_for('first_login_password'))
                 flash(f'Bienvenido, {row["nombre"]}.', 'success')
                 next_url = request.form.get('next', '').strip() or request.args.get('next', '').strip()
                 return redirect_to_local_url(next_url, 'dashboard')
@@ -665,7 +719,12 @@ def create_app() -> Flask:
             session['db_mode'] = 'prod'
             flash('La cuenta demo aún no está disponible.', 'danger')
             return redirect(url_for('login'))
-        login_user(User(row, is_demo_db=True), remember=False)
+        user = User(row, is_demo_db=True)
+        login_user(user, remember=False)
+        session['last_activity_ts'] = int(datetime.now().timestamp())
+        if user.needs_password_change():
+            flash('Debes crear una nueva contraseña para activar tu acceso.', 'warning')
+            return redirect(url_for('first_login_password'))
         flash('Entraste a la demo de Parcelia.', 'success')
         return redirect(url_for('dashboard'))
 
@@ -675,8 +734,39 @@ def create_app() -> Flask:
         logout_user()
         session.pop('db_mode', None)
         session.pop('_csrf_token', None)
+        session.pop('last_activity_ts', None)
         flash('Sesión cerrada.', 'success')
         return redirect(url_for('login'))
+
+    @app.route('/primer-acceso', methods=['GET', 'POST'])
+    @login_required
+    def first_login_password():
+        if not getattr(current_user, 'needs_password_change', lambda: False)():
+            return redirect(url_for('dashboard'))
+        if request.method == 'POST':
+            current_password = request.form.get('current_password', '')
+            new_password = request.form.get('new_password', '')
+            confirm_password = request.form.get('confirm_password', '')
+
+            if not check_password_hash(current_user.password_hash, current_password):
+                flash('La contraseña temporal actual no es correcta.', 'danger')
+            elif len(new_password) < 8:
+                flash('La nueva contraseña debe tener al menos 8 caracteres.', 'danger')
+            elif new_password != confirm_password:
+                flash('La confirmación no coincide con la nueva contraseña.', 'danger')
+            elif current_password == new_password:
+                flash('La nueva contraseña debe ser distinta a la temporal.', 'danger')
+            else:
+                db = get_db()
+                db.execute('UPDATE usuarios SET password_hash=?, must_change_password=0 WHERE id=?', (generate_password_hash(new_password), int(current_user.id.split(':')[-1]) if ':' in current_user.id else int(current_user.id)))
+                db.commit()
+                fresh_row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.id = ?', (int(current_user.id.split(':')[-1]) if ':' in current_user.id else int(current_user.id),))
+                if fresh_row:
+                    login_user(User(fresh_row, is_demo_db=getattr(current_user, 'is_demo_db', False)), remember=not getattr(current_user, 'is_demo_db', False), fresh=True)
+                session['last_activity_ts'] = int(datetime.now().timestamp())
+                flash('Tu nueva contraseña fue guardada. Ya puedes usar el sistema.', 'success')
+                return redirect(url_for('dashboard'))
+        return render_template('first_login_password.html')
 
     @app.get('/healthz')
     def healthz():
@@ -688,6 +778,282 @@ def create_app() -> Flask:
         except Exception as exc:
             app.logger.exception('Health check failed')
             return {'status': 'error', 'detail': str(exc)}, 500
+
+    def api_response(payload: dict[str, Any], status: int = 200, headers: dict[str, str] | None = None):
+        response = app.response_class(
+            response=app.json.dumps(payload),
+            status=status,
+            mimetype='application/json',
+        )
+        origin = request.headers.get('Origin', '').strip()
+        allowed_origins = app.config.get('API_ALLOWED_ORIGINS', ['*'])
+        if '*' in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin or '*'
+        elif origin and origin in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        if headers:
+            for k, v in headers.items():
+                response.headers[k] = v
+        return response
+
+    def api_preflight_response():
+        return api_response({'ok': True}, 200)
+
+    def api_get_token_from_request() -> str:
+        auth = request.headers.get('Authorization', '').strip()
+        if auth.lower().startswith('bearer '):
+            return auth[7:].strip()
+        return request.headers.get('X-API-Token', '').strip()
+
+    def load_api_user_from_token() -> User | None:
+        token = api_get_token_from_request()
+        if not token:
+            return None
+        try:
+            payload = decode_api_token(token)
+        except (SignatureExpired, BadSignature):
+            return None
+        mode = payload.get('mode', 'prod')
+        db_url = str(DEMO_DB_PATH) if mode == 'demo' else app.config['DATABASE']
+        db = DBAdapter(db_url)
+        try:
+            row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.id = ? AND u.activo = 1', (int(payload['uid']),))
+            if not row:
+                return None
+            return User(row, is_demo_db=(mode == 'demo'))
+        finally:
+            db.close()
+
+    def api_login_required(view_func):
+        @wraps(view_func)
+        def wrapped(*args, **kwargs):
+            user = load_api_user_from_token()
+            if user is None:
+                return api_response({'ok': False, 'error': 'invalid_token', 'message': 'Token ausente, inválido o expirado.'}, 401)
+            g.api_user = user
+            g.api_db = DBAdapter(str(DEMO_DB_PATH) if getattr(user, 'is_demo_db', False) else app.config['DATABASE'])
+            try:
+                return view_func(*args, **kwargs)
+            finally:
+                db = g.pop('api_db', None)
+                if db is not None:
+                    db.close()
+                g.pop('api_user', None)
+        return wrapped
+
+    def api_user_to_dict(user: User) -> dict[str, Any]:
+        return {
+            'id': int(user.id.split(':')[-1]) if ':' in user.id else int(user.id),
+            'username': user.username,
+            'nombre': user.nombre,
+            'role': user.role,
+            'role_label': user.role_label,
+            'activo': bool(user.activo),
+            'condominio_id': user.condominio_id,
+            'condominio_nombre': user.condominio_nombre,
+            'parcela_id': user.parcela_id,
+            'must_change_password': bool(getattr(user, 'must_change_password', False)),
+            'demo_mode': bool(getattr(user, 'is_demo_db', False)),
+        }
+
+    def api_get_condominio_id(db: DBAdapter, user: User) -> int | None:
+        selected = request.args.get('condominio_id', '').strip()
+        if getattr(user, 'is_global_admin', lambda: False)() and selected.isdigit():
+            return int(selected)
+        if getattr(user, 'condominio_id', None):
+            return int(user.condominio_id)
+        return get_default_condominio_id(db)
+
+    @app.route('/api/<path:_path>', methods=['OPTIONS'])
+    def api_options(_path: str):
+        return api_preflight_response()
+
+    @app.get('/api/health')
+    def api_health():
+        try:
+            db = get_db()
+            row = db.fetchone('SELECT 1 AS ok')
+            return api_response({'ok': True, 'status': 'ok', 'db': int(row['ok'] if row else 0), 'version': '1.0'})
+        except Exception as exc:
+            app.logger.exception('API health check failed')
+            return api_response({'ok': False, 'error': 'health_error', 'message': str(exc)}, 500)
+
+    @app.post('/api/auth/login')
+    def api_auth_login():
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get('username', '')).strip().lower()
+        password = str(payload.get('password', ''))
+        mode = str(payload.get('mode', '')).strip().lower()
+        is_demo_login = mode == 'demo' or username in {'demo@parcelia.cl', 'comite@parcelia.cl'}
+        db = DBAdapter(str(DEMO_DB_PATH) if is_demo_login else app.config['DATABASE'])
+        try:
+            row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE lower(u.username) = ? AND u.activo = 1', (username,))
+            if not row or not check_password_hash(row['password_hash'], password):
+                return api_response({'ok': False, 'error': 'invalid_credentials', 'message': 'Usuario o contraseña incorrectos.'}, 401)
+            user = User(row, is_demo_db=is_demo_login)
+            return api_response({
+                'ok': True,
+                'token': generate_api_token(user),
+                'token_type': 'Bearer',
+                'expires_in': int(app.config.get('API_TOKEN_MAX_AGE_SECONDS', 0) or 0),
+                'user': api_user_to_dict(user),
+                'must_change_password': bool(user.needs_password_change()),
+            })
+        finally:
+            db.close()
+
+    @app.get('/api/me')
+    @api_login_required
+    def api_me():
+        return api_response({'ok': True, 'user': api_user_to_dict(g.api_user)})
+
+    @app.post('/api/auth/change-password')
+    @api_login_required
+    def api_change_password():
+        payload = request.get_json(silent=True) or {}
+        current_password = str(payload.get('current_password', ''))
+        new_password = str(payload.get('new_password', ''))
+        confirm_password = str(payload.get('confirm_password', ''))
+        user = g.api_user
+        db = g.api_db
+        if not check_password_hash(user.password_hash, current_password):
+            return api_response({'ok': False, 'error': 'invalid_current_password', 'message': 'La contraseña actual no es correcta.'}, 400)
+        if len(new_password) < 8:
+            return api_response({'ok': False, 'error': 'weak_password', 'message': 'La nueva contraseña debe tener al menos 8 caracteres.'}, 400)
+        if new_password != confirm_password:
+            return api_response({'ok': False, 'error': 'password_mismatch', 'message': 'La confirmación no coincide.'}, 400)
+        if current_password == new_password:
+            return api_response({'ok': False, 'error': 'password_reused', 'message': 'La nueva contraseña debe ser distinta a la actual.'}, 400)
+        user_id = int(user.id.split(':')[-1]) if ':' in user.id else int(user.id)
+        db.execute('UPDATE usuarios SET password_hash = ?, must_change_password = 0 WHERE id = ?', (generate_password_hash(new_password), user_id))
+        db.commit()
+        fresh_row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.id = ?', (user_id,))
+        fresh_user = User(fresh_row, is_demo_db=getattr(user, 'is_demo_db', False)) if fresh_row else user
+        return api_response({'ok': True, 'message': 'Contraseña actualizada correctamente.', 'user': api_user_to_dict(fresh_user), 'token': generate_api_token(fresh_user)})
+
+    @app.get('/api/dashboard')
+    @api_login_required
+    def api_dashboard():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        current_month = datetime.now().strftime('%Y-%m')
+        if db.kind == 'sqlite':
+            resumen_mes = db.fetchone(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto END), 0) AS ingresos_mes,
+                    COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto END), 0) AS gastos_mes,
+                    COUNT(*) AS movimientos_mes
+                FROM movimientos
+                WHERE strftime('%Y-%m', fecha) = ? AND condominio_id = ?
+                """,
+                (current_month, condominio_id),
+            )
+        else:
+            resumen_mes = db.fetchone(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto END), 0) AS ingresos_mes,
+                    COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto END), 0) AS gastos_mes,
+                    COUNT(*) AS movimientos_mes
+                FROM movimientos
+                WHERE to_char(fecha, 'YYYY-MM') = ? AND condominio_id = ?
+                """,
+                (current_month, condominio_id),
+            )
+        resumen_ingresos = db.fetchone('SELECT COALESCE(SUM(monto), 0) AS total FROM movimientos WHERE tipo = ? AND condominio_id = ?', ('ingreso', condominio_id))
+        resumen_gastos = db.fetchone('SELECT COALESCE(SUM(monto), 0) AS total FROM movimientos WHERE tipo = ? AND condominio_id = ?', ('gasto', condominio_id))
+        parcelas_activas = db.fetchone('SELECT COUNT(*) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?', (condominio_id,))
+        condominio = db.fetchone('SELECT id, nombre, activo FROM condominios WHERE id = ?', (condominio_id,))
+        return api_response({
+            'ok': True,
+            'condominio': dict(condominio) if condominio else None,
+            'summary': {
+                'ingresos_total': float((resumen_ingresos['total'] if resumen_ingresos else 0) or 0),
+                'gastos_total': float((resumen_gastos['total'] if resumen_gastos else 0) or 0),
+                'saldo_total': float(((resumen_ingresos['total'] if resumen_ingresos else 0) or 0) - ((resumen_gastos['total'] if resumen_gastos else 0) or 0)),
+                'ingresos_mes': float((resumen_mes['ingresos_mes'] if resumen_mes else 0) or 0),
+                'gastos_mes': float((resumen_mes['gastos_mes'] if resumen_mes else 0) or 0),
+                'movimientos_mes': int((resumen_mes['movimientos_mes'] if resumen_mes else 0) or 0),
+                'parcelas_activas': int((parcelas_activas['total'] if parcelas_activas else 0) or 0),
+            },
+        })
+
+    @app.get('/api/parcelas')
+    @api_login_required
+    def api_parcelas():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        q = request.args.get('q', '').strip()
+        params: list[Any] = [condominio_id]
+        sql = 'SELECT id, nombre, curso, cuota_mensual, apoderado, telefono, direccion, observacion_ficha, activo, condominio_id FROM parcelas WHERE condominio_id = ?'
+        if getattr(user, 'parcela_id', None):
+            sql += ' AND id = ?'
+            params.append(int(user.parcela_id))
+        if q:
+            sql += ' AND (lower(nombre) LIKE ? OR lower(COALESCE(curso, "")) LIKE ?)'
+            params.extend([f'%{q.lower()}%', f'%{q.lower()}%'])
+        sql += ' ORDER BY nombre'
+        rows = db.fetchall(sql, params)
+        return api_response({'ok': True, 'items': [dict(r) for r in rows], 'count': len(rows)})
+
+    @app.get('/api/movimientos')
+    @api_login_required
+    def api_movimientos():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        try:
+            limit = int(request.args.get('limit', '50') or 50)
+        except Exception:
+            limit = 50
+        limit = min(max(limit, 1), 200)
+        tipo = request.args.get('tipo', 'Todos').strip()
+        q = request.args.get('q', '').strip()
+        fecha_desde = request.args.get('fecha_desde', '').strip()
+        fecha_hasta = request.args.get('fecha_hasta', '').strip()
+        params: list[Any] = [condominio_id]
+        sql = """
+            SELECT m.id, m.fecha, m.tipo, m.concepto, m.monto, m.observacion, m.origen,
+                   COALESCE(a.nombre, '-') AS actividad,
+                   COALESCE(p.nombre, '-') AS parcela
+            FROM movimientos m
+            LEFT JOIN actividades a ON a.id = m.actividad_id
+            LEFT JOIN parcelas p ON p.id = m.parcela_id
+            WHERE m.condominio_id = ?
+        """
+        if getattr(user, 'parcela_id', None):
+            sql += ' AND m.parcela_id = ?'
+            params.append(int(user.parcela_id))
+        if tipo and tipo != 'Todos':
+            sql += ' AND m.tipo = ?'
+            params.append(tipo)
+        if q:
+            sql += ' AND (lower(m.concepto) LIKE ? OR lower(COALESCE(m.observacion, "")) LIKE ?)'
+            params.extend([f'%{q.lower()}%', f'%{q.lower()}%'])
+        if fecha_desde:
+            sql += ' AND m.fecha >= ?'
+            params.append(fecha_desde)
+        if fecha_hasta:
+            sql += ' AND m.fecha <= ?'
+            params.append(fecha_hasta)
+        sql += ' ORDER BY m.fecha DESC, m.id DESC LIMIT ?'
+        params.append(limit)
+        rows = db.fetchall(sql, params)
+        items = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item['monto'] = float(item.get('monto') or 0)
+            except Exception:
+                pass
+            items.append(item)
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
 
     @app.route('/')
     def index():
@@ -941,9 +1307,9 @@ def create_app() -> Flask:
     def usuarios_list():
         db = get_db()
         if current_user.is_global_admin():
-            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username")
+            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, u.must_change_password, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username")
         else:
-            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id WHERE u.condominio_id = ? ORDER BY u.nombre, u.username", (current_user.condominio_id,))
+            usuarios = db.fetchall("SELECT u.id, u.username, u.nombre, u.role, u.activo, u.must_change_password, c.nombre AS condominio_nombre, u.condominio_id, u.parcela_id, p.nombre AS parcela_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id LEFT JOIN parcelas p ON p.id = u.parcela_id WHERE u.condominio_id = ? ORDER BY u.nombre, u.username", (current_user.condominio_id,))
         return render_template('usuarios_list.html', usuarios=usuarios)
 
     @app.route('/usuarios/nuevo', methods=['GET', 'POST'])
@@ -959,6 +1325,7 @@ def create_app() -> Flask:
             password = request.form.get('password', '')
             role = request.form.get('role', 'comite')
             activo = 1 if request.form.get('activo') == 'on' else 0
+            must_change_password = 1 if request.form.get('must_change_password') else 0
             condominio_raw = request.form.get('condominio_id', '').strip()
             condominio_id = int(condominio_raw) if condominio_raw.isdigit() else None
             parcela_raw = request.form.get('parcela_id', '').strip()
@@ -984,8 +1351,8 @@ def create_app() -> Flask:
                 flash('Ese nombre de usuario ya existe.', 'danger')
             else:
                 db.execute(
-                    'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, parcela_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (username, generate_password_hash(password), role, nombre, activo, condominio_id, parcela_id)
+                    'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, parcela_id, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (username, generate_password_hash(password), role, nombre, activo, condominio_id, parcela_id, must_change_password)
                 )
                 db.commit()
                 flash('Usuario creado.', 'success')
@@ -996,7 +1363,7 @@ def create_app() -> Flask:
     @role_required('admin')
     def usuarios_edit(user_id: int):
         db = get_db()
-        usuario = db.fetchone('SELECT id, username, role, nombre, activo, condominio_id, parcela_id FROM usuarios WHERE id=?', (user_id,))
+        usuario = db.fetchone('SELECT id, username, role, nombre, activo, condominio_id, parcela_id, must_change_password FROM usuarios WHERE id=?', (user_id,))
         if not usuario:
             flash('Usuario no encontrado.', 'danger')
             return redirect(url_for('usuarios_list'))
@@ -1011,6 +1378,7 @@ def create_app() -> Flask:
             password = request.form.get('password', '')
             role = request.form.get('role', 'comite')
             activo = 1 if request.form.get('activo') == 'on' else 0
+            must_change_password = 1 if request.form.get('must_change_password') else 0
             condominio_raw = request.form.get('condominio_id', '').strip()
             condominio_id = int(condominio_raw) if condominio_raw.isdigit() else None
             parcela_raw = request.form.get('parcela_id', '').strip()
@@ -1033,11 +1401,11 @@ def create_app() -> Flask:
                 flash('Ese nombre de usuario ya existe.', 'danger')
             else:
                 if password:
-                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, password_hash=? WHERE id=?',
-                               (nombre, username, role, activo, condominio_id, parcela_id, generate_password_hash(password), user_id))
+                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, password_hash=?, must_change_password=? WHERE id=?',
+                               (nombre, username, role, activo, condominio_id, parcela_id, generate_password_hash(password), must_change_password, user_id))
                 else:
-                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=? WHERE id=?',
-                               (nombre, username, role, activo, condominio_id, parcela_id, user_id))
+                    db.execute('UPDATE usuarios SET nombre=?, username=?, role=?, activo=?, condominio_id=?, parcela_id=?, must_change_password=? WHERE id=?',
+                               (nombre, username, role, activo, condominio_id, parcela_id, must_change_password, user_id))
                 db.commit()
                 flash('Usuario actualizado.', 'success')
                 return redirect(url_for('usuarios_list'))
@@ -2869,7 +3237,7 @@ def seed_default_admin(db: DBAdapter) -> None:
     password = os.environ.get('ADMIN_PASSWORD', 'admin123')
     nombre = os.environ.get('ADMIN_NAME', 'Administrador')
     db.execute(
-        'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, 1, NULL)',
+        'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, must_change_password) VALUES (?, ?, ?, ?, 1, NULL, 0)',
         (username, generate_password_hash(password), 'admin', nombre),
     )
     db.commit()
@@ -3085,12 +3453,12 @@ def seed_demo_environment(db: DBAdapter) -> None:
     # Usuario demo y usuario comité
     if not db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', ('demo@parcelia.cl',)):
         db.execute(
-            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, 1, ?)',
+            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, must_change_password) VALUES (?, ?, ?, ?, 1, ?, 0)',
             ('demo@parcelia.cl', generate_password_hash('123456'), 'admin', 'Demo Parcelia', condominio_ids['Parcelas Vista Campo (Demo)'])
         )
     if not db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', ('comite@parcelia.cl',)):
         db.execute(
-            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id) VALUES (?, ?, ?, ?, 1, ?)',
+            'INSERT INTO usuarios (username, password_hash, role, nombre, activo, condominio_id, must_change_password) VALUES (?, ?, ?, ?, 1, ?, 0)',
             ('comite@parcelia.cl', generate_password_hash('123456'), 'comite', 'Comité Parcelia', condominio_ids['Parcelas Vista Campo (Demo)'])
         )
 
@@ -3128,7 +3496,8 @@ def init_db(db: DBAdapter) -> None:
             telefono TEXT,
             direccion TEXT,
             observacion_ficha TEXT,
-            activo INTEGER NOT NULL DEFAULT 1
+            activo INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS pagos_parcelas (
@@ -3149,7 +3518,8 @@ def init_db(db: DBAdapter) -> None:
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL,
             nombre TEXT NOT NULL,
-            activo INTEGER NOT NULL DEFAULT 1
+            activo INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS ciclos_cobranza (
@@ -3371,6 +3741,7 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
+            'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS must_change_password INTEGER NOT NULL DEFAULT 0',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE movimientos ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE pagos_parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
@@ -3392,6 +3763,7 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE parcelas ADD COLUMN observacion_ficha TEXT',
             'ALTER TABLE usuarios ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE usuarios ADD COLUMN parcela_id INTEGER',
+            'ALTER TABLE usuarios ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0',
             'ALTER TABLE parcelas ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE movimientos ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE pagos_parcelas ADD COLUMN condominio_id INTEGER',
@@ -3444,10 +3816,11 @@ def init_db(db: DBAdapter) -> None:
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL,
                     nombre TEXT NOT NULL,
-                    activo INTEGER NOT NULL DEFAULT 1
+                    activo INTEGER NOT NULL DEFAULT 1,
+                    must_change_password INTEGER NOT NULL DEFAULT 0
                 );
-                INSERT INTO usuarios (id, username, password_hash, role, nombre, activo)
-                SELECT id, username, password_hash, CASE WHEN role='solo_lectura' THEN 'comite' ELSE role END, nombre, activo FROM usuarios_old;
+                INSERT INTO usuarios (id, username, password_hash, role, nombre, activo, must_change_password)
+                SELECT id, username, password_hash, CASE WHEN role='solo_lectura' THEN 'comite' ELSE role END, nombre, activo, 0 FROM usuarios_old;
                 DROP TABLE usuarios_old;
                 """)
                 db.commit()
