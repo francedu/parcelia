@@ -1055,6 +1055,91 @@ def create_app() -> Flask:
             items.append(item)
         return api_response({'ok': True, 'items': items, 'count': len(items)})
 
+
+
+    @app.post('/api/movimientos')
+    @api_login_required
+    def api_create_movimiento():
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_finance', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear movimientos.'}, 403)
+
+        condominio_id = api_get_condominio_id(db, user)
+        payload = request.get_json(silent=True) or {}
+
+        tipo = str(payload.get('tipo', '')).strip().lower()
+        concepto = str(payload.get('concepto', '') or payload.get('descripcion', '')).strip()
+        observacion = str(payload.get('observacion', '') or '').strip()
+        fecha = str(payload.get('fecha', '') or '').strip()
+        origen = str(payload.get('origen', 'general') or 'general').strip().lower()
+
+        if tipo not in ('ingreso', 'gasto'):
+            return api_response({'ok': False, 'error': 'invalid_tipo', 'message': 'El tipo debe ser ingreso o gasto.'}, 400)
+        if not concepto:
+            return api_response({'ok': False, 'error': 'missing_concepto', 'message': 'Debes indicar un concepto o descripción.'}, 400)
+        if not fecha:
+            fecha = datetime.now().strftime('%Y-%m-%d')
+        try:
+            validar_fecha(fecha)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_fecha', 'message': 'La fecha es inválida. Usa formato YYYY-MM-DD.'}, 400)
+
+        try:
+            monto = float(payload.get('monto', 0) or 0)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_monto', 'message': 'El monto debe ser numérico.'}, 400)
+        if monto <= 0:
+            return api_response({'ok': False, 'error': 'invalid_monto', 'message': 'El monto debe ser mayor a 0.'}, 400)
+
+        actividad_id = payload.get('actividad_id')
+        parcela_id = payload.get('parcela_id')
+        actividad_id = int(actividad_id) if str(actividad_id or '').isdigit() else None
+        parcela_id = int(parcela_id) if str(parcela_id or '').isdigit() else None
+
+        if getattr(user, 'parcela_id', None):
+            parcela_id = int(user.parcela_id)
+
+        if parcela_id is not None:
+            parcela = db.fetchone('SELECT id, nombre FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id))
+            if not parcela:
+                return api_response({'ok': False, 'error': 'invalid_parcela', 'message': 'La parcela indicada no existe en este condominio.'}, 400)
+        else:
+            parcela = None
+
+        if actividad_id is not None:
+            actividad = db.fetchone('SELECT id, nombre FROM actividades WHERE id = ? AND condominio_id = ?', (actividad_id, condominio_id))
+            if not actividad:
+                return api_response({'ok': False, 'error': 'invalid_actividad', 'message': 'La actividad indicada no existe en este condominio.'}, 400)
+        else:
+            actividad = None
+
+        cur = db.execute(
+            'INSERT INTO movimientos (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, origen, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, origen or 'general', condominio_id),
+        )
+        movimiento_id = getattr(cur, 'lastrowid', None)
+        if movimiento_id is None and db.kind == 'postgres':
+            row = db.fetchone("SELECT currval(pg_get_serial_sequence('movimientos', 'id')) AS id")
+            movimiento_id = row['id'] if row else None
+        db.commit()
+
+        return api_response({
+            'ok': True,
+            'id': int(movimiento_id) if movimiento_id is not None else None,
+            'item': {
+                'id': int(movimiento_id) if movimiento_id is not None else None,
+                'fecha': fecha,
+                'tipo': tipo,
+                'concepto': concepto,
+                'monto': float(monto),
+                'observacion': observacion,
+                'origen': origen or 'general',
+                'actividad': actividad['nombre'] if actividad else '-',
+                'parcela': parcela['nombre'] if parcela else '-',
+            }
+        }, 201)
+
     @app.route('/')
     def index():
         return redirect(url_for('dashboard' if current_user.is_authenticated else 'landing'))
