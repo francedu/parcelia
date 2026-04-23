@@ -857,6 +857,7 @@ def create_app() -> Flask:
             'parcela_id': user.parcela_id,
             'must_change_password': bool(getattr(user, 'must_change_password', False)),
             'demo_mode': bool(getattr(user, 'is_demo_db', False)),
+            'can_manage_votaciones': bool(getattr(user, 'can_manage_actas', lambda: False)()),
         }
 
     def api_get_condominio_id(db: DBAdapter, user: User) -> int | None:
@@ -1168,6 +1169,7 @@ def create_app() -> Flask:
         for row in rows:
             item = dict(row)
             item['can_vote'] = bool(getattr(user, 'parcela_id', None)) and item.get('estado') == 'abierta'
+            item['can_manage'] = bool(getattr(user, 'can_manage_actas', lambda: False)())
             item['total_votos'] = int(item.get('total_votos') or 0)
             items.append(item)
         return api_response({'ok': True, 'items': items, 'count': len(items)})
@@ -1233,6 +1235,7 @@ def create_app() -> Flask:
             'puede_votar': puede_votar,
             'ya_voto': voto_usuario is not None,
             'voto_usuario': dict(voto_usuario) if voto_usuario else None,
+            'can_manage': bool(getattr(user, 'can_manage_actas', lambda: False)()),
             'opciones': opciones,
         }})
 
@@ -1267,6 +1270,100 @@ def create_app() -> Flask:
         )
         db.commit()
         return api_response({'ok': True, 'message': 'Voto registrado correctamente.', 'opcion_id': opcion_id, 'opcion_texto': opcion['texto']})
+
+    @app.get('/api/actas')
+    @api_login_required
+    def api_actas():
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_actas', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para administrar votaciones.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        rows = db.fetchall(
+            """
+            SELECT id, titulo, fecha, estado
+            FROM actas
+            WHERE condominio_id = ?
+            ORDER BY fecha DESC, id DESC
+            LIMIT 100
+            """,
+            (condominio_id,),
+        )
+        return api_response({'ok': True, 'items': [dict(r) for r in rows], 'count': len(rows)})
+
+    @app.post('/api/votaciones')
+    @api_login_required
+    def api_votacion_create():
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_actas', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear votaciones.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        payload = request.get_json(silent=True) or {}
+        try:
+            acta_id = int(payload.get('acta_id'))
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_acta', 'message': 'Debes seleccionar un acta válida.'}, 400)
+        titulo = str(payload.get('titulo', '')).strip()
+        descripcion = str(payload.get('descripcion', '')).strip()
+        opciones = payload.get('opciones') or []
+        if not isinstance(opciones, list):
+            opciones = []
+        opciones_texto = [str(item).strip() for item in opciones if str(item).strip()]
+        if not titulo:
+            return api_response({'ok': False, 'error': 'missing_title', 'message': 'Debes indicar el título de la votación.'}, 400)
+        if len(opciones_texto) < 2:
+            return api_response({'ok': False, 'error': 'missing_options', 'message': 'Debes ingresar al menos dos opciones.'}, 400)
+        acta = db.fetchone('SELECT id, titulo, fecha FROM actas WHERE id = ? AND condominio_id = ?', (acta_id, condominio_id))
+        if not acta:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Acta no encontrada.'}, 404)
+        try:
+            if db.kind == 'postgres':
+                cur = db.execute(
+                    'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
+                    (acta_id, titulo, descripcion, 'abierta', user.nombre or user.username, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+                )
+                row = cur.fetchone()
+                votacion_id = row['id'] if row else None
+            else:
+                cur = db.execute(
+                    'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (acta_id, titulo, descripcion, 'abierta', user.nombre or user.username, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+                )
+                votacion_id = cur.lastrowid
+            if not votacion_id:
+                raise ValueError('No se pudo obtener el id de la votación creada.')
+            for idx, opcion in enumerate(opciones_texto, start=1):
+                db.execute(
+                    'INSERT INTO votacion_opciones (votacion_id, texto, orden, condominio_id) VALUES (?, ?, ?, ?)',
+                    (votacion_id, opcion, idx, condominio_id),
+                )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            app.logger.exception('Error creando votación API')
+            return api_response({'ok': False, 'error': 'create_failed', 'message': str(exc)}, 500)
+        return api_response({'ok': True, 'id': int(votacion_id), 'message': 'Votación creada correctamente.'}, 201)
+
+    @app.post('/api/votaciones/<int:votacion_id>/cerrar')
+    @api_login_required
+    def api_votacion_close(votacion_id: int):
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_actas', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para cerrar votaciones.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        votacion = db.fetchone('SELECT id, estado FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+        if not votacion:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
+        if votacion['estado'] != 'abierta':
+            return api_response({'ok': False, 'error': 'already_closed', 'message': 'La votación ya está cerrada.'}, 400)
+        db.execute(
+            "UPDATE votaciones SET estado = 'cerrada', closed_at = ?, updated_at = ? WHERE id = ? AND condominio_id = ?",
+            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), votacion_id, condominio_id),
+        )
+        db.commit()
+        return api_response({'ok': True, 'message': 'Votación cerrada correctamente.'})
 
     @app.get('/api/parcelas/<int:parcela_id>')
     @api_login_required
