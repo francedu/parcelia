@@ -1364,18 +1364,26 @@ def create_app() -> Flask:
             return api_response({'ok': False, 'error': 'already_closed', 'message': 'La votación ya está cerrada.'}, 400)
         _, _, estado_resuelto = calcular_resumen_votacion(db, votacion_id, condominio_id)
         closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        try:
-            db.execute(
-                'UPDATE votaciones SET estado = ?, closed_at = ?, updated_at = ? WHERE id = ? AND condominio_id = ?',
-                (estado_resuelto, closed_at, closed_at, votacion_id, condominio_id),
-            )
-        except Exception:
-            db.execute(
-                'UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?',
-                (estado_resuelto, closed_at, votacion_id, condominio_id),
-            )
+        # Mantener la misma actualización que usa la web.
+        # Importante: no usar updated_at aquí, porque algunas bases de Render no tienen esa columna
+        # y en PostgreSQL un error deja la transacción abortada.
+        db.execute(
+            'UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?',
+            (estado_resuelto, closed_at, votacion_id, condominio_id),
+        )
         db.commit()
-        return api_response({'ok': True, 'estado': estado_resuelto, 'message': 'Votación cerrada correctamente.'})
+        return api_response({
+            'ok': True,
+            'id': int(votacion_id),
+            'estado': estado_resuelto,
+            'message': 'Votación cerrada correctamente.',
+            'item': {
+                'id': int(votacion_id),
+                'estado': estado_resuelto,
+                'closed_at': closed_at,
+                'cerrada': True,
+            },
+        })
 
     @app.get('/api/parcelas/<int:parcela_id>')
     @api_login_required
