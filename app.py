@@ -1140,6 +1140,134 @@ def create_app() -> Flask:
             }
         }, 201)
 
+    @app.get('/api/votaciones')
+    @api_login_required
+    def api_votaciones():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        estado = request.args.get('estado', '').strip().lower()
+        params: list[Any] = [condominio_id]
+        sql = (
+            "SELECT v.id, v.acta_id, v.titulo, v.descripcion, v.estado, v.created_at, v.closed_at, "
+            "a.titulo AS acta_titulo, a.fecha AS acta_fecha, COUNT(DISTINCT vv.id) AS total_votos "
+            "FROM votaciones v "
+            "LEFT JOIN actas a ON a.id = v.acta_id "
+            "LEFT JOIN votacion_votos vv ON vv.votacion_id = v.id "
+            "WHERE v.condominio_id = ?"
+        )
+        if estado in ('abierta', 'cerrada', 'aprobada', 'rechazada'):
+            sql += ' AND v.estado = ?'
+            params.append(estado)
+        sql += (
+            ' GROUP BY v.id, v.acta_id, v.titulo, v.descripcion, v.estado, v.created_at, v.closed_at, a.titulo, a.fecha'
+            " ORDER BY CASE WHEN v.estado = 'abierta' THEN 0 ELSE 1 END, COALESCE(v.created_at, a.fecha) DESC, v.id DESC"
+        )
+        rows = db.fetchall(sql, params)
+        items = []
+        for row in rows:
+            item = dict(row)
+            item['can_vote'] = bool(getattr(user, 'parcela_id', None)) and item.get('estado') == 'abierta'
+            item['total_votos'] = int(item.get('total_votos') or 0)
+            items.append(item)
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
+
+    @app.get('/api/votaciones/<int:votacion_id>')
+    @api_login_required
+    def api_votacion_detail(votacion_id: int):
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        votacion = db.fetchone(
+            "SELECT v.id, v.acta_id, v.titulo, v.descripcion, v.estado, v.created_at, v.closed_at, "
+            "a.titulo AS acta_titulo, a.fecha AS acta_fecha "
+            "FROM votaciones v LEFT JOIN actas a ON a.id = v.acta_id "
+            "WHERE v.id = ? AND v.condominio_id = ?",
+            (votacion_id, condominio_id),
+        )
+        if not votacion:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
+        opciones_rows = db.fetchall(
+            "SELECT o.id, o.texto, o.orden, COUNT(v.id) AS votos "
+            "FROM votacion_opciones o "
+            "LEFT JOIN votacion_votos v ON v.opcion_id = o.id "
+            "WHERE o.votacion_id = ? AND o.condominio_id = ? "
+            "GROUP BY o.id, o.texto, o.orden ORDER BY o.orden, o.id",
+            (votacion_id, condominio_id),
+        )
+        user_id = int(user.id.split(':')[-1]) if ':' in user.id else int(user.id)
+        voto_usuario = db.fetchone(
+            "SELECT vv.id, vv.opcion_id, vv.created_at, vo.texto AS opcion_texto "
+            "FROM votacion_votos vv "
+            "INNER JOIN votacion_opciones vo ON vo.id = vv.opcion_id "
+            "WHERE vv.votacion_id = ? AND vv.user_id = ? LIMIT 1",
+            (votacion_id, user_id),
+        )
+        raw_opciones = []
+        total_votos = 0
+        for row in opciones_rows:
+            votos = int(row['votos'] or 0)
+            total_votos += votos
+            raw_opciones.append((row, votos))
+        opciones = []
+        for row, votos in raw_opciones:
+            opciones.append({
+                'id': int(row['id']),
+                'texto': row['texto'],
+                'orden': int(row['orden'] or 0),
+                'votos': votos,
+                'porcentaje': round((votos * 100.0 / total_votos), 1) if total_votos > 0 else 0.0,
+            })
+        puede_votar = bool(getattr(user, 'parcela_id', None)) and votacion['estado'] == 'abierta' and voto_usuario is None
+        return api_response({'ok': True, 'item': {
+            'id': int(votacion['id']),
+            'acta_id': votacion['acta_id'],
+            'acta_titulo': votacion['acta_titulo'],
+            'acta_fecha': votacion['acta_fecha'],
+            'titulo': votacion['titulo'],
+            'descripcion': votacion['descripcion'],
+            'estado': votacion['estado'],
+            'created_at': votacion['created_at'],
+            'closed_at': votacion['closed_at'],
+            'total_votos': total_votos,
+            'puede_votar': puede_votar,
+            'ya_voto': voto_usuario is not None,
+            'voto_usuario': dict(voto_usuario) if voto_usuario else None,
+            'opciones': opciones,
+        }})
+
+    @app.post('/api/votaciones/<int:votacion_id>/votar')
+    @api_login_required
+    def api_votacion_vote(votacion_id: int):
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        if not getattr(user, 'parcela_id', None):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'Tu usuario no tiene una parcela asignada para votar.'}, 403)
+        votacion = db.fetchone('SELECT id, estado FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+        if not votacion:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
+        if votacion['estado'] != 'abierta':
+            return api_response({'ok': False, 'error': 'closed', 'message': 'La votación ya está cerrada.'}, 400)
+        user_id = int(user.id.split(':')[-1]) if ':' in user.id else int(user.id)
+        if db.fetchone('SELECT 1 FROM votacion_votos WHERE votacion_id = ? AND user_id = ?', (votacion_id, user_id)):
+            return api_response({'ok': False, 'error': 'already_voted', 'message': 'Ya registraste tu voto en esta votación.'}, 400)
+        payload = request.get_json(silent=True) or {}
+        opcion_id_raw = payload.get('opcion_id')
+        try:
+            opcion_id = int(opcion_id_raw)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_option', 'message': 'Debes seleccionar una opción válida.'}, 400)
+        opcion = db.fetchone('SELECT id, texto FROM votacion_opciones WHERE id = ? AND votacion_id = ? AND condominio_id = ?', (opcion_id, votacion_id, condominio_id))
+        if not opcion:
+            return api_response({'ok': False, 'error': 'invalid_option', 'message': 'La opción seleccionada no pertenece a esta votación.'}, 400)
+        db.execute(
+            'INSERT INTO votacion_votos (votacion_id, opcion_id, user_id, parcela_id, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?)',
+            (votacion_id, opcion_id, user_id, int(user.parcela_id), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+        )
+        db.commit()
+        return api_response({'ok': True, 'message': 'Voto registrado correctamente.', 'opcion_id': opcion_id, 'opcion_texto': opcion['texto']})
+
     @app.get('/api/parcelas/<int:parcela_id>')
     @api_login_required
     def api_parcela_detail(parcela_id: int):
