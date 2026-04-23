@@ -857,8 +857,12 @@ def create_app() -> Flask:
             'parcela_id': user.parcela_id,
             'must_change_password': bool(getattr(user, 'must_change_password', False)),
             'demo_mode': bool(getattr(user, 'is_demo_db', False)),
-            'can_manage_votaciones': bool(getattr(user, 'can_manage_actas', lambda: False)()),
+            'can_manage_votaciones': api_can_manage_votaciones(user),
         }
+
+    def api_can_manage_votaciones(user: User) -> bool:
+        role = (getattr(user, 'role', '') or '').strip().lower()
+        return role in ('admin', 'presidente', 'secretario') or bool(getattr(user, 'can_manage_actas', lambda: False)())
 
     def api_get_condominio_id(db: DBAdapter, user: User) -> int | None:
         selected = request.args.get('condominio_id', '').strip()
@@ -1169,7 +1173,7 @@ def create_app() -> Flask:
         for row in rows:
             item = dict(row)
             item['can_vote'] = bool(getattr(user, 'parcela_id', None)) and item.get('estado') == 'abierta'
-            item['can_manage'] = bool(getattr(user, 'can_manage_actas', lambda: False)())
+            item['can_manage'] = api_can_manage_votaciones(user)
             item['total_votos'] = int(item.get('total_votos') or 0)
             items.append(item)
         return api_response({'ok': True, 'items': items, 'count': len(items)})
@@ -1235,7 +1239,7 @@ def create_app() -> Flask:
             'puede_votar': puede_votar,
             'ya_voto': voto_usuario is not None,
             'voto_usuario': dict(voto_usuario) if voto_usuario else None,
-            'can_manage': bool(getattr(user, 'can_manage_actas', lambda: False)()),
+            'can_manage': api_can_manage_votaciones(user),
             'opciones': opciones,
         }})
 
@@ -1276,7 +1280,7 @@ def create_app() -> Flask:
     def api_actas():
         db = g.api_db
         user = g.api_user
-        if not getattr(user, 'can_manage_actas', lambda: False)():
+        if not api_can_manage_votaciones(user):
             return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para administrar votaciones.'}, 403)
         condominio_id = api_get_condominio_id(db, user)
         rows = db.fetchall(
@@ -1296,7 +1300,7 @@ def create_app() -> Flask:
     def api_votacion_create():
         db = g.api_db
         user = g.api_user
-        if not getattr(user, 'can_manage_actas', lambda: False)():
+        if not api_can_manage_votaciones(user):
             return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear votaciones.'}, 403)
         condominio_id = api_get_condominio_id(db, user)
         payload = request.get_json(silent=True) or {}
@@ -1350,7 +1354,7 @@ def create_app() -> Flask:
     def api_votacion_close(votacion_id: int):
         db = g.api_db
         user = g.api_user
-        if not getattr(user, 'can_manage_actas', lambda: False)():
+        if not api_can_manage_votaciones(user):
             return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para cerrar votaciones.'}, 403)
         condominio_id = api_get_condominio_id(db, user)
         votacion = db.fetchone('SELECT id, estado FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
@@ -1358,12 +1362,20 @@ def create_app() -> Flask:
             return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
         if votacion['estado'] != 'abierta':
             return api_response({'ok': False, 'error': 'already_closed', 'message': 'La votación ya está cerrada.'}, 400)
-        db.execute(
-            "UPDATE votaciones SET estado = 'cerrada', closed_at = ?, updated_at = ? WHERE id = ? AND condominio_id = ?",
-            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), votacion_id, condominio_id),
-        )
+        _, _, estado_resuelto = calcular_resumen_votacion(db, votacion_id, condominio_id)
+        closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            db.execute(
+                'UPDATE votaciones SET estado = ?, closed_at = ?, updated_at = ? WHERE id = ? AND condominio_id = ?',
+                (estado_resuelto, closed_at, closed_at, votacion_id, condominio_id),
+            )
+        except Exception:
+            db.execute(
+                'UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?',
+                (estado_resuelto, closed_at, votacion_id, condominio_id),
+            )
         db.commit()
-        return api_response({'ok': True, 'message': 'Votación cerrada correctamente.'})
+        return api_response({'ok': True, 'estado': estado_resuelto, 'message': 'Votación cerrada correctamente.'})
 
     @app.get('/api/parcelas/<int:parcela_id>')
     @api_login_required
