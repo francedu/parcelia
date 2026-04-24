@@ -25,9 +25,6 @@
         <a class="nav-link {% if request.endpoint and request.endpoint.startswith('movimientos') %}active{% endif %}" href="{{ url_for('movimientos_list') }}">Movimientos</a>
         <a class="nav-link {% if request.endpoint and request.endpoint.startswith('reportes_mensual') %}active{% endif %}" href="{{ url_for('reportes_mensual') }}">Reportes</a>
         <a class="nav-link {% if request.endpoint and request.endpoint.startswith('actas') %}active{% endif %}" href="{{ url_for('actas_list') }}">Actas y minutas</a>
-        {% if current_user.role in ['admin', 'presidente', 'tesorero', 'secretario', 'comite'] %}
-          <a class="nav-link {% if request.endpoint == 'notificaciones_enviar' %}active{% endif %}" href="{{ url_for('notificaciones_enviar') }}">Enviar aviso</a>
-        {% endif %}
         <a class="nav-link {% if request.endpoint and request.endpoint.startswith('actividades') %}active{% endif %}" href="{{ url_for('actividades_list') }}">Categorías</a>
         {% if current_user.role == 'admin' %}
           <a class="nav-link {% if request.endpoint and request.endpoint.startswith('condominios') %}active{% endif %}" href="{{ url_for('condominios_list') }}">Condominios</a>
@@ -38,7 +35,7 @@
         {% endif %}
       </div>
       <div class="d-flex align-items-center gap-3 text-white nav-user-meta">
-        {% if current_user.is_global_admin() and admin_condominios %}
+        {% if admin_condominios and (current_user.is_global_admin() or admin_condominios|length > 1) %}
           <form method="get" action="{{ request.path or url_for('dashboard') }}" class="d-flex align-items-center gap-2">
             {% for key, value in request.args.items() %}
               {% if key not in ['condominio_id', 'page'] %}
@@ -91,8 +88,6 @@
           {% elif endpoint.startswith('actas') %}
             <li class="breadcrumb-item"><a href="{{ url_for('actas_list') }}">Actas y minutas</a></li>
             <li class="breadcrumb-item active" aria-current="page">{{ 'Detalle' if endpoint.endswith('detail') else 'Editar' if endpoint.endswith('edit') else 'Nueva' if endpoint.endswith('new') else 'Listado' }}</li>
-          {% elif endpoint == 'notificaciones_enviar' %}
-            <li class="breadcrumb-item active" aria-current="page">Enviar aviso</li>
           {% elif endpoint.startswith('actividades') %}
             <li class="breadcrumb-item"><a href="{{ url_for('actividades_list') }}">Categorías</a></li>
             <li class="breadcrumb-item active" aria-current="page">{{ 'Detalle' if endpoint.endswith('detail') else 'Editar' if endpoint.endswith('edit') else 'Nueva' if endpoint.endswith('new') else 'Listado' }}</li>
