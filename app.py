@@ -12,6 +12,14 @@ from functools import wraps
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pathlib import Path
 from typing import Any
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except Exception:
+    firebase_admin = None
+    credentials = None
+    messaging = None
 from urllib.parse import urlparse
 
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -200,6 +208,106 @@ def column_exists(db: DBAdapter, table_name: str, column_name: str) -> bool:
         return False
 
 
+
+
+def firebase_push_enabled() -> bool:
+    return firebase_admin is not None and messaging is not None and bool(os.environ.get('FIREBASE_PROJECT_ID') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON'))
+
+
+def init_firebase_admin(app: Flask) -> bool:
+    """Inicializa Firebase Admin SDK una sola vez. Soporta GOOGLE_APPLICATION_CREDENTIALS o JSON en env."""
+    if firebase_admin is None or messaging is None:
+        return False
+    try:
+        if firebase_admin._apps:
+            return True
+        project_id = os.environ.get('FIREBASE_PROJECT_ID') or None
+        service_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON')
+        if service_json and credentials is not None:
+            import json as _json
+            cred = credentials.Certificate(_json.loads(service_json))
+            firebase_admin.initialize_app(cred, {'projectId': project_id} if project_id else None)
+        elif os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+            firebase_admin.initialize_app(options={'projectId': project_id} if project_id else None)
+        else:
+            return False
+        return True
+    except Exception:
+        app.logger.exception('No se pudo inicializar Firebase Admin SDK')
+        return False
+
+
+def push_platform_from_user_agent() -> str:
+    ua = (request.headers.get('User-Agent') or '').lower()
+    if 'android' in ua:
+        return 'android'
+    if 'iphone' in ua or 'ipad' in ua or 'ios' in ua:
+        return 'ios'
+    if 'mac' in ua:
+        return 'macos'
+    if 'windows' in ua:
+        return 'windows'
+    return 'unknown'
+
+
+def send_fcm_to_tokens(app: Flask, tokens: list[str], title: str, body: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    clean_tokens = [t.strip() for t in tokens if t and str(t).strip()]
+    if not clean_tokens:
+        return {'enabled': firebase_push_enabled(), 'requested': 0, 'sent': 0, 'failed': 0}
+    if not init_firebase_admin(app):
+        return {'enabled': False, 'requested': len(clean_tokens), 'sent': 0, 'failed': 0, 'message': 'Firebase Admin no configurado'}
+    sent = 0
+    failed = 0
+    errors: list[str] = []
+    payload_data = {str(k): str(v) for k, v in (data or {}).items() if v is not None}
+    for token in clean_tokens:
+        try:
+            msg = messaging.Message(
+                token=token,
+                notification=messaging.Notification(title=title, body=body),
+                data=payload_data,
+                android=messaging.AndroidConfig(priority='high'),
+                apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.Aps(sound='default'))),
+            )
+            messaging.send(msg)
+            sent += 1
+        except Exception as exc:
+            failed += 1
+            errors.append(str(exc)[:180])
+    return {'enabled': True, 'requested': len(clean_tokens), 'sent': sent, 'failed': failed, 'errors': errors[:5]}
+
+
+def get_active_push_tokens(db: DBAdapter, condominio_id: int | None, user_id: int | None = None, role: str | None = None) -> list[str]:
+    if not table_exists(db, 'push_tokens'):
+        return []
+    params: list[Any] = []
+    sql = """
+        SELECT DISTINCT pt.token
+        FROM push_tokens pt
+        INNER JOIN usuarios u ON u.id = pt.user_id
+        WHERE pt.activo = 1 AND u.activo = 1
+    """
+    if condominio_id is not None:
+        sql += ' AND (pt.condominio_id = ? OR pt.condominio_id IS NULL)'
+        params.append(condominio_id)
+    if user_id is not None:
+        sql += ' AND pt.user_id = ?'
+        params.append(user_id)
+    if role:
+        sql += ' AND u.role = ?'
+        params.append(role)
+    rows = db.fetchall(sql, params)
+    return [str(r['token']) for r in rows]
+
+
+def record_push_notification(db: DBAdapter, condominio_id: int | None, title: str, message: str, type_: str, created_by: str | None = None, target_role: str | None = None) -> None:
+    if not table_exists(db, 'notificaciones_push'):
+        return
+    db.execute(
+        'INSERT INTO notificaciones_push (condominio_id, titulo, mensaje, tipo, target_role, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (condominio_id, title, message, type_, target_role, created_by, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+    )
+
 def migrate_legacy_parcelas_schema(db: DBAdapter) -> None:
     """Migra instalaciones antiguas basadas en alumnos/pagos_alumnos al esquema parcelas/pagos_parcelas."""
     try:
@@ -262,6 +370,7 @@ def migrate_legacy_parcelas_schema(db: DBAdapter) -> None:
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    init_firebase_admin(app)
     debug_enabled = os.environ.get('APP_DEBUG', '0') == '1'
     secret_key = os.environ.get('SECRET_KEY', '').strip()
     if not secret_key:
@@ -1492,6 +1601,17 @@ def create_app() -> Flask:
             cur = db.execute("""INSERT INTO actas (titulo, fecha, lugar, hora_inicio, hora_termino, asistentes, temas, desarrollo, acuerdos, responsables, observaciones, estado, created_by, updated_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values)
             acta_id = getattr(cur, 'lastrowid', None)
         db.commit()
+        try:
+            if estado == 'aprobada':
+                title = 'Nueva acta disponible'
+                body = titulo
+                tokens = get_active_push_tokens(db, condominio_id)
+                send_fcm_to_tokens(app, tokens, title, body, {'type': 'acta', 'acta_id': acta_id or '', 'screen': 'actas'})
+                record_push_notification(db, condominio_id, title, body, 'acta', user.nombre or user.username)
+                db.commit()
+        except Exception:
+            db.rollback()
+            app.logger.exception('No se pudo enviar push de acta')
         return api_response({'ok': True, 'id': int(acta_id) if acta_id else None, 'message': 'Acta/minuta creada correctamente.'}, 201)
 
     @app.get('/api/pagos')
@@ -1559,6 +1679,17 @@ def create_app() -> Flask:
             return api_response({'ok': False, 'error': 'duplicate_pago', 'message': 'Esa parcela ya tiene un pago registrado para ese mes.'}, 409)
         registrar_pago_parcela(db, parcela_id, fecha, mes, monto, observacion, None, 'cuota_mensual')
         db.commit()
+        try:
+            row_user = db.fetchone('SELECT id FROM usuarios WHERE parcela_id = ? AND condominio_id = ? AND activo = 1 LIMIT 1', (parcela_id, condominio_id))
+            title = 'Pago registrado'
+            body = f'Tu pago de gastos comunes para {mes} fue registrado correctamente.'
+            tokens = get_active_push_tokens(db, condominio_id, user_id=int(row_user['id']) if row_user else None)
+            send_fcm_to_tokens(app, tokens, title, body, {'type': 'pago', 'mes': mes, 'screen': 'finanzas'})
+            record_push_notification(db, condominio_id, title, body, 'pago', user.nombre or user.username, None)
+            db.commit()
+        except Exception:
+            db.rollback()
+            app.logger.exception('No se pudo enviar push de pago')
         return api_response({'ok': True, 'message': 'Pago registrado correctamente.'}, 201)
 
 
@@ -1626,6 +1757,82 @@ def create_app() -> Flask:
             },
         })
 
+    @app.post('/api/push/register')
+    @api_login_required
+    def api_push_register():
+        """Registra/actualiza el token FCM del dispositivo del usuario autenticado."""
+        db = g.api_db
+        user = g.api_user
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get('token') or '').strip()
+        if not token:
+            return api_response({'ok': False, 'error': 'invalid_token', 'message': 'Token FCM inválido.'}, 400)
+        platform = str(payload.get('platform') or push_platform_from_user_agent()).strip()[:40]
+        device_name = str(payload.get('device_name') or '').strip()[:120]
+        condominio_id = api_get_condominio_id(db, user)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        existing = db.fetchone('SELECT id FROM push_tokens WHERE token = ?', (token,)) if table_exists(db, 'push_tokens') else None
+        try:
+            if existing:
+                db.execute('UPDATE push_tokens SET user_id = ?, condominio_id = ?, platform = ?, device_name = ?, activo = 1, updated_at = ?, last_seen_at = ? WHERE token = ?', (int(user.id), condominio_id, platform, device_name, now, now, token))
+            else:
+                db.execute('INSERT INTO push_tokens (user_id, condominio_id, token, platform, device_name, activo, created_at, updated_at, last_seen_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)', (int(user.id), condominio_id, token, platform, device_name, now, now, now))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            app.logger.exception('Error registrando token push')
+            return api_response({'ok': False, 'error': 'push_register_failed', 'message': str(exc)}, 500)
+        return api_response({'ok': True, 'message': 'Dispositivo registrado para notificaciones push.', 'push_enabled': firebase_push_enabled()})
+
+    @app.post('/api/push/unregister')
+    @api_login_required
+    def api_push_unregister():
+        db = g.api_db
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get('token') or '').strip()
+        if token:
+            db.execute('UPDATE push_tokens SET activo = 0, updated_at = ? WHERE token = ?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), token))
+        else:
+            db.execute('UPDATE push_tokens SET activo = 0, updated_at = ? WHERE user_id = ?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), int(g.api_user.id)))
+        db.commit()
+        return api_response({'ok': True, 'message': 'Dispositivo desregistrado.'})
+
+    @app.post('/api/notificaciones/test')
+    @api_login_required
+    def api_push_test():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        title = 'Prueba de Parcelia'
+        body = 'Tus notificaciones push están configuradas correctamente.'
+        tokens = get_active_push_tokens(db, condominio_id, user_id=int(user.id))
+        result = send_fcm_to_tokens(app, tokens, title, body, {'type': 'test', 'screen': 'notificaciones'})
+        record_push_notification(db, condominio_id, title, body, 'test', user.nombre or user.username)
+        db.commit()
+        return api_response({'ok': True, 'message': 'Prueba de notificación procesada.', 'push': result})
+
+    @app.post('/api/notificaciones/enviar')
+    @api_login_required
+    def api_push_send_notice():
+        db = g.api_db
+        user = g.api_user
+        if (getattr(user, 'role', '') or '').lower() not in ('admin', 'presidente', 'tesorero', 'secretario', 'comite'):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para enviar avisos.'}, 403)
+        payload = request.get_json(silent=True) or {}
+        title = str(payload.get('title') or payload.get('titulo') or '').strip()[:90]
+        body = str(payload.get('body') or payload.get('mensaje') or '').strip()[:240]
+        target_role = str(payload.get('role') or payload.get('target_role') or '').strip() or None
+        if not title or not body:
+            return api_response({'ok': False, 'error': 'invalid_notice', 'message': 'Debes indicar título y mensaje.'}, 400)
+        if target_role and target_role not in ALLOWED_ROLES:
+            return api_response({'ok': False, 'error': 'invalid_role', 'message': 'Rol destino inválido.'}, 400)
+        condominio_id = api_get_condominio_id(db, user)
+        tokens = get_active_push_tokens(db, condominio_id, role=target_role)
+        result = send_fcm_to_tokens(app, tokens, title, body, {'type': 'aviso', 'screen': 'notificaciones'})
+        record_push_notification(db, condominio_id, title, body, 'aviso', user.nombre or user.username, target_role)
+        db.commit()
+        return api_response({'ok': True, 'message': 'Aviso enviado.', 'push': result})
+
     @app.get('/api/notificaciones')
     @api_login_required
     def api_notificaciones():
@@ -1635,6 +1842,25 @@ def create_app() -> Flask:
         condominio_id = api_get_condominio_id(db, user)
         current_month = datetime.now().strftime('%Y-%m')
         items: list[dict[str, Any]] = []
+
+        if table_exists(db, 'notificaciones_push'):
+            push_rows = db.fetchall("""
+                SELECT id, titulo, mensaje, tipo, created_at
+                FROM notificaciones_push
+                WHERE (condominio_id = ? OR condominio_id IS NULL)
+                  AND (target_role IS NULL OR target_role = ?)
+                ORDER BY created_at DESC, id DESC
+                LIMIT 20
+                """, (condominio_id, getattr(user, 'role', None)))
+            for r in push_rows:
+                items.append({
+                    'id': 'push-' + str(r['id']),
+                    'type': r['tipo'] or 'aviso',
+                    'title': r['titulo'],
+                    'message': r['mensaje'],
+                    'date': str(r['created_at'] or '')[:10],
+                    'urgent': False,
+                })
 
         cuota_sql = 'SELECT COALESCE(SUM(cuota_mensual), 0) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?'
         cuota_params: list[Any] = [condominio_id]
@@ -4500,6 +4726,16 @@ def init_db(db: DBAdapter) -> None:
     migrate_legacy_parcelas_schema(db)
     try:
         db.execute('CREATE TABLE IF NOT EXISTS condominios (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE, direccion TEXT, activo INTEGER NOT NULL DEFAULT 1)' if db.kind == 'sqlite' else 'CREATE TABLE IF NOT EXISTS condominios (id BIGSERIAL PRIMARY KEY, nombre TEXT NOT NULL UNIQUE, direccion TEXT, activo INTEGER NOT NULL DEFAULT 1)')
+        db.commit()
+        if db.kind == 'postgres':
+            db.execute('''CREATE TABLE IF NOT EXISTS push_tokens (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, condominio_id BIGINT, token TEXT NOT NULL UNIQUE, platform TEXT, device_name TEXT, activo INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id BIGSERIAL PRIMARY KEY, condominio_id BIGINT, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
+        else:
+            db.execute('''CREATE TABLE IF NOT EXISTS push_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, condominio_id INTEGER, token TEXT NOT NULL UNIQUE, platform TEXT, device_name TEXT, activo INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id INTEGER PRIMARY KEY AUTOINCREMENT, condominio_id INTEGER, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_condominio ON push_tokens(condominio_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_notificaciones_push_condominio ON notificaciones_push(condominio_id, created_at)')
         db.commit()
     except Exception:
         db.rollback()
