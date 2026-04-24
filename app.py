@@ -864,6 +864,18 @@ def create_app() -> Flask:
         role = (getattr(user, 'role', '') or '').strip().lower()
         return role in ('admin', 'presidente', 'secretario') or bool(getattr(user, 'can_manage_actas', lambda: False)())
 
+
+    def api_user_should_be_limited_to_own_parcela(user: User) -> bool:
+        """Solo limita la API a una parcela cuando el usuario es realmente de vista individual."""
+        if not getattr(user, 'parcela_id', None):
+            return False
+        role = (getattr(user, 'role', '') or '').strip().lower()
+        if role in ('admin', 'presidente', 'tesorero', 'secretario', 'comite', 'propietario'):
+            return False
+        if getattr(user, 'can_manage_finance', lambda: False)():
+            return False
+        return True
+
     def api_get_condominio_id(db: DBAdapter, user: User) -> int | None:
         selected = request.args.get('condominio_id', '').strip()
         if getattr(user, 'is_global_admin', lambda: False)() and selected.isdigit():
@@ -997,7 +1009,7 @@ def create_app() -> Flask:
         q = request.args.get('q', '').strip()
         params: list[Any] = [condominio_id]
         sql = 'SELECT id, nombre, curso, cuota_mensual, apoderado, telefono, direccion, observacion_ficha, activo, condominio_id FROM parcelas WHERE condominio_id = ?'
-        if getattr(user, 'parcela_id', None):
+        if api_user_should_be_limited_to_own_parcela(user):
             sql += ' AND id = ?'
             params.append(int(user.parcela_id))
         if q:
@@ -1032,7 +1044,7 @@ def create_app() -> Flask:
             LEFT JOIN parcelas p ON p.id = m.parcela_id
             WHERE m.condominio_id = ?
         """
-        if getattr(user, 'parcela_id', None):
+        if api_user_should_be_limited_to_own_parcela(user):
             sql += ' AND m.parcela_id = ?'
             params.append(int(user.parcela_id))
         if tipo and tipo != 'Todos':
