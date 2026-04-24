@@ -1,0 +1,160 @@
+{% extends 'base.html' %}
+{% block title %}Enviar aviso · Parcelia{% endblock %}
+{% block content %}
+<div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-4">
+  <div>
+    <div class="text-uppercase small text-secondary fw-semibold">Notificaciones</div>
+    <h1 class="h3 mb-1">Enviar aviso</h1>
+    <p class="text-secondary mb-0">Comunica avisos reales a residentes desde el panel web. No se exponen tokens ni herramientas técnicas.</p>
+  </div>
+  <div class="badge {{ 'text-bg-success' if push_enabled else 'text-bg-warning' }} fs-6 px-3 py-2">
+    {{ 'Push activo' if push_enabled else 'Push no configurado' }}
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body p-4">
+        <form method="post" class="vstack gap-3">
+          <div>
+            <label class="form-label fw-semibold" for="titulo">Título</label>
+            <input class="form-control form-control-lg" id="titulo" name="titulo" maxlength="90" required value="{{ form.get('titulo', '') }}" placeholder="Ej: Aviso importante">
+          </div>
+          <div>
+            <label class="form-label fw-semibold" for="mensaje">Mensaje</label>
+            <textarea class="form-control" id="mensaje" name="mensaje" rows="5" maxlength="500" required placeholder="Escribe el mensaje para residentes">{{ form.get('mensaje', '') }}</textarea>
+            <div class="form-text">Máximo 500 caracteres. El aviso quedará visible en la app en Avisos.</div>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label fw-semibold" for="destino">Destino</label>
+              {% set selected_destino = form.get('destino', 'todos') %}
+              <select class="form-select" id="destino" name="destino" data-destino-select>
+                <option value="todos" {% if selected_destino == 'todos' %}selected{% endif %}>Todos</option>
+                <option value="morosos" {% if selected_destino == 'morosos' %}selected{% endif %}>Morosos / pagos vencidos</option>
+                <option value="rol" {% if selected_destino == 'rol' %}selected{% endif %}>Por rol</option>
+                <option value="usuario" {% if selected_destino == 'usuario' %}selected{% endif %}>Usuario específico</option>
+                <option value="parcela" {% if selected_destino == 'parcela' %}selected{% endif %}>Parcela / vivienda</option>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label fw-semibold" for="tipo">Tipo de aviso</label>
+              {% set selected_tipo = form.get('tipo', 'aviso') %}
+              <select class="form-select" id="tipo" name="tipo">
+                <option value="aviso" {% if selected_tipo == 'aviso' %}selected{% endif %}>Aviso general</option>
+                <option value="pago_vencido" {% if selected_tipo == 'pago_vencido' %}selected{% endif %}>Pago vencido</option>
+                <option value="acta" {% if selected_tipo == 'acta' %}selected{% endif %}>Acta / minuta</option>
+                <option value="finanzas" {% if selected_tipo == 'finanzas' %}selected{% endif %}>Finanzas</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row g-3" data-target-field="rol">
+            <div class="col-md-6">
+              <label class="form-label fw-semibold" for="role">Rol</label>
+              <select class="form-select" id="role" name="role">
+                <option value="">Selecciona un rol</option>
+                {% for value, label in roles %}
+                  <option value="{{ value }}" {% if form.get('role') == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div class="row g-3" data-target-field="usuario">
+            <div class="col-md-8">
+              <label class="form-label fw-semibold" for="user_id">Usuario</label>
+              <select class="form-select" id="user_id" name="user_id">
+                <option value="">Selecciona un usuario</option>
+                {% for u in usuarios %}
+                  <option value="{{ u['id'] }}" {% if form.get('user_id')|string == u['id']|string %}selected{% endif %}>{{ u['nombre'] or u['username'] }} · {{ u['role'] }} · {{ u['condominio_nombre'] }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div class="row g-3" data-target-field="parcela">
+            <div class="col-md-8">
+              <label class="form-label fw-semibold" for="parcela_id">Parcela / vivienda</label>
+              <select class="form-select" id="parcela_id" name="parcela_id">
+                <option value="">Selecciona una parcela</option>
+                {% for p in parcelas %}
+                  <option value="{{ p['id'] }}" {% if form.get('parcela_id')|string == p['id']|string %}selected{% endif %}>{{ p['nombre'] }} · {{ p['condominio_nombre'] }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div class="row g-3" data-target-field="morosos">
+            <div class="col-md-4">
+              <label class="form-label fw-semibold" for="mes">Mes</label>
+              <input class="form-control" id="mes" name="mes" type="month" value="{{ form.get('mes', '') }}">
+              <div class="form-text">Opcional. Si queda vacío, usa el mes actual.</div>
+            </div>
+          </div>
+
+          <input type="hidden" name="screen" value="notificaciones">
+          <div class="d-flex flex-column flex-sm-row gap-2 pt-2">
+            <button class="btn btn-primary btn-lg" type="submit">Enviar aviso</button>
+            <a class="btn btn-outline-secondary btn-lg" href="{{ url_for('dashboard') }}">Cancelar</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-body p-4">
+        <h2 class="h5 mb-3">Buenas prácticas</h2>
+        <ul class="text-secondary mb-0">
+          <li>Usa mensajes breves y accionables.</li>
+          <li>Para pagos vencidos, usa destino <strong>Morosos</strong>.</li>
+          <li>Los avisos se guardan en la app aunque no haya push configurado.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+      <div class="card-body p-4">
+        <h2 class="h5 mb-3">Últimos avisos</h2>
+        {% if recientes %}
+          <div class="list-group list-group-flush">
+            {% for item in recientes %}
+              <div class="list-group-item px-0">
+                <div class="d-flex justify-content-between gap-2">
+                  <strong>{{ item['titulo'] }}</strong>
+                  <span class="badge text-bg-light">{{ item['tipo'] }}</span>
+                </div>
+                <div class="small text-secondary mb-1">{{ item['created_at'] }} · {{ item['created_by'] or 'Sistema' }}</div>
+                <div class="small">{{ item['mensaje'] }}</div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-secondary mb-0">Aún no hay avisos enviados.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const destinoSelect = document.querySelector('[data-destino-select]');
+const fields = Array.from(document.querySelectorAll('[data-target-field]'));
+function syncTargetFields() {
+  const value = destinoSelect ? destinoSelect.value : 'todos';
+  fields.forEach((field) => {
+    field.classList.toggle('d-none', field.dataset.targetField !== value);
+  });
+}
+if (destinoSelect) {
+  destinoSelect.addEventListener('change', syncTargetFields);
+  syncTargetFields();
+}
+</script>
+{% endblock %}

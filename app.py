@@ -1942,6 +1942,117 @@ def create_app() -> Flask:
         db.commit()
         return api_response({'ok': True, 'message': 'Aviso a morosos procesado.', 'mes': mes, 'parcelas_morosas': len(parcela_ids), 'push': result})
 
+    @app.route('/notificaciones/enviar', methods=['GET', 'POST'])
+    @login_required
+    def notificaciones_enviar():
+        """Panel web de negocio para enviar avisos push sin exponer tokens ni usar herramientas técnicas."""
+        db = get_db()
+        if not _api_can_send_business_notifications(current_user):
+            flash('No tienes permisos para enviar avisos.', 'danger')
+            return redirect(url_for('dashboard'))
+
+        condominio_id = get_current_condominio_id(db)
+        roles = [(r, ROLE_LABELS.get(r, r.title())) for r in ALLOWED_ROLES]
+        if current_user.is_global_admin():
+            usuarios = db.fetchall(
+                """
+                SELECT u.id, u.nombre, u.username, u.role, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM usuarios u
+                LEFT JOIN condominios c ON c.id = u.condominio_id
+                WHERE COALESCE(u.activo, 1) = 1
+                ORDER BY COALESCE(c.nombre, 'ZZZ'), u.nombre, u.username
+                """
+            )
+            parcelas = db.fetchall(
+                """
+                SELECT p.id, p.nombre, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM parcelas p
+                LEFT JOIN condominios c ON c.id = p.condominio_id
+                WHERE COALESCE(p.activo, 1) = 1
+                ORDER BY COALESCE(c.nombre, 'ZZZ'), p.nombre
+                """
+            )
+        else:
+            usuarios = db.fetchall(
+                """
+                SELECT u.id, u.nombre, u.username, u.role, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM usuarios u
+                LEFT JOIN condominios c ON c.id = u.condominio_id
+                WHERE COALESCE(u.activo, 1) = 1 AND u.condominio_id = ?
+                ORDER BY u.nombre, u.username
+                """,
+                (condominio_id,),
+            )
+            parcelas = db.fetchall(
+                """
+                SELECT p.id, p.nombre, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM parcelas p
+                LEFT JOIN condominios c ON c.id = p.condominio_id
+                WHERE COALESCE(p.activo, 1) = 1 AND p.condominio_id = ?
+                ORDER BY p.nombre
+                """,
+                (condominio_id,),
+            )
+
+        form = {}
+        if request.method == 'POST':
+            payload = {
+                'titulo': request.form.get('titulo', '').strip(),
+                'mensaje': request.form.get('mensaje', '').strip(),
+                'destino': request.form.get('destino', 'todos').strip(),
+                'role': request.form.get('role', '').strip(),
+                'user_id': request.form.get('user_id', '').strip(),
+                'parcela_id': request.form.get('parcela_id', '').strip(),
+                'mes': request.form.get('mes', '').strip(),
+                'tipo': request.form.get('tipo', 'aviso').strip() or 'aviso',
+                'screen': request.form.get('screen', 'notificaciones').strip() or 'notificaciones',
+            }
+            form = payload
+            titulo = str(payload.get('titulo') or '')[:90]
+            mensaje = str(payload.get('mensaje') or '')[:500]
+            if not titulo or not mensaje:
+                flash('Debes indicar título y mensaje.', 'danger')
+            else:
+                try:
+                    tokens, target_meta = _resolve_notification_target(db, condominio_id, payload)
+                    result = send_fcm_to_tokens(app, tokens, titulo, mensaje, {'type': payload['tipo'], 'screen': payload['screen']})
+                    record_push_notification(
+                        db, condominio_id, titulo, mensaje, payload['tipo'], current_user.nombre or current_user.username,
+                        target_role=target_meta.get('target_role'),
+                        target_user_id=target_meta.get('target_user_id'),
+                        target_parcela_id=target_meta.get('target_parcela_id'),
+                        target_group=target_meta.get('target_group'),
+                    )
+                    db.commit()
+                    requested = int(result.get('requested') or 0)
+                    sent = int(result.get('sent') or 0)
+                    failed = int(result.get('failed') or 0)
+                    if not result.get('enabled'):
+                        flash('Aviso guardado, pero Firebase Admin no está configurado para enviar push.', 'warning')
+                    elif requested == 0:
+                        flash('Aviso guardado. No hay dispositivos registrados para ese destino.', 'warning')
+                    else:
+                        flash(f'Aviso enviado. Push enviados: {sent}/{requested}' + (f' · fallidos: {failed}' if failed else ''), 'success' if sent else 'warning')
+                    return redirect(url_for('notificaciones_enviar'))
+                except Exception as exc:
+                    db.rollback()
+                    app.logger.exception('Error enviando aviso desde panel web')
+                    flash(f'No se pudo enviar el aviso: {exc}', 'danger')
+
+        recientes = []
+        if table_exists(db, 'notificaciones_push'):
+            recientes = db.fetchall(
+                """
+                SELECT titulo, mensaje, tipo, target_role, target_group, created_by, created_at
+                FROM notificaciones_push
+                WHERE condominio_id = ? OR condominio_id IS NULL
+                ORDER BY created_at DESC, id DESC
+                LIMIT 12
+                """,
+                (condominio_id,),
+            )
+        return render_template('notificaciones_enviar.html', roles=roles, usuarios=usuarios, parcelas=parcelas, recientes=recientes, form=form, push_enabled=firebase_push_enabled())
+
     @app.get('/api/notificaciones')
     @api_login_required
     def api_notificaciones():
