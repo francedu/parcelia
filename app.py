@@ -985,6 +985,20 @@ def create_app() -> Flask:
         db = g.api_db
         user = g.api_user
         condominio_id = api_get_condominio_id(db, user)
+        if condominio_id is None:
+            return api_response({
+                'ok': True,
+                'condominio': None,
+                'summary': {
+                    'ingresos_total': 0.0,
+                    'gastos_total': 0.0,
+                    'saldo_total': 0.0,
+                    'ingresos_mes': 0.0,
+                    'gastos_mes': 0.0,
+                    'movimientos_mes': 0,
+                    'parcelas_activas': 0,
+                },
+            })
         current_month = datetime.now().strftime('%Y-%m')
         if db.kind == 'sqlite':
             resumen_mes = db.fetchone(
@@ -1006,7 +1020,7 @@ def create_app() -> Flask:
                     COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto END), 0) AS gastos_mes,
                     COUNT(*) AS movimientos_mes
                 FROM movimientos
-                WHERE to_char(fecha, 'YYYY-MM') = ? AND condominio_id = ?
+                WHERE substring(fecha::text from 1 for 7) = ? AND condominio_id = ?
                 """,
                 (current_month, condominio_id),
             )
