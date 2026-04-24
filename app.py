@@ -1125,6 +1125,8 @@ def create_app() -> Flask:
             return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear movimientos.'}, 403)
 
         condominio_id = api_get_condominio_id(db, user)
+        if condominio_id is None:
+            return api_response({'ok': False, 'error': 'missing_condominio', 'message': 'No tienes un condominio activo asignado.'}, 403)
         payload = request.get_json(silent=True) or {}
 
         tipo = str(payload.get('tipo', '')).strip().lower()
@@ -1885,7 +1887,7 @@ def create_app() -> Flask:
                 flash('Debes asignar un condominio al usuario.', 'danger')
             elif parcela_id and not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
                 flash('La parcela seleccionada no pertenece al condominio del usuario.', 'danger')
-            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ?', (parcela_id,)):
+            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
                 flash('Esa parcela ya está vinculada a otro usuario.', 'danger')
             elif db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', (username,)):
                 flash('Ese nombre de usuario ya existe.', 'danger')
@@ -1941,7 +1943,7 @@ def create_app() -> Flask:
                 flash('Debes asignar un condominio al usuario.', 'danger')
             elif parcela_id and not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
                 flash('La parcela seleccionada no pertenece al condominio del usuario.', 'danger')
-            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND id <> ?', (parcela_id, user_id)):
+            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND condominio_id = ? AND id <> ?', (parcela_id, condominio_id, user_id)):
                 flash('Esa parcela ya está vinculada a otro usuario.', 'danger')
             elif db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=? AND id<>?', (username, user_id)):
                 flash('Ese nombre de usuario ya existe.', 'danger')
@@ -1972,6 +1974,10 @@ def create_app() -> Flask:
         if not current_user.is_global_admin() and usuario['condominio_id'] != current_user.condominio_id:
             flash('Solo puedes eliminar usuarios de tu propio condominio.', 'danger')
             return redirect(url_for('usuarios_list'))
+        if table_exists(db, 'usuario_condominios'):
+            db.execute('DELETE FROM usuario_condominios WHERE user_id=?', (user_id,))
+        if table_exists(db, 'push_tokens'):
+            db.execute('DELETE FROM push_tokens WHERE user_id=?', (user_id,))
         db.execute('DELETE FROM usuarios WHERE id=?', (user_id,))
         db.commit()
         flash('Usuario eliminado.', 'success')
@@ -2588,7 +2594,10 @@ def create_app() -> Flask:
             except Exception:
                 flash('Fecha o mes inválido.', 'danger')
                 return render_template('pagos_form.html', parcelas=parcelas, actividades=actividades, pago=None)
-            if tipo_pago == 'actividad_parcela' and not actividad_id:
+            refs_ok, refs_msg = validar_referencias_condominio(db, condominio_id, parcela_id=parcela_id, actividad_id=actividad_id if actividad_id else None)
+            if not refs_ok:
+                flash(refs_msg, 'danger')
+            elif tipo_pago == 'actividad_parcela' and not actividad_id:
                 flash('Debes seleccionar una categoría para un ingreso extraordinario asociado.', 'danger')
             elif tipo_pago == 'cuota_mensual' and pago_duplicado(db, parcela_id, mes):
                 flash('Esa parcela ya tiene un pago de gasto común registrado para ese mes.', 'danger')
@@ -2636,7 +2645,10 @@ def create_app() -> Flask:
             except Exception:
                 flash('Fecha o mes inválido.', 'danger')
                 return render_template('pagos_form.html', parcelas=parcelas, actividades=actividades, pago=None)
-            if tipo_pago == 'actividad_parcela' and not actividad_id:
+            refs_ok, refs_msg = validar_referencias_condominio(db, condominio_id, parcela_id=parcela_id, actividad_id=actividad_id if actividad_id else None)
+            if not refs_ok:
+                flash(refs_msg, 'danger')
+            elif tipo_pago == 'actividad_parcela' and not actividad_id:
                 flash('Debes seleccionar una categoría para un ingreso extraordinario asociado.', 'danger')
             elif tipo_pago == 'cuota_mensual' and pago_duplicado(db, parcela_id, mes):
                 flash('Esa parcela ya tiene un pago de gasto común registrado para ese mes.', 'danger')
@@ -2669,7 +2681,10 @@ def create_app() -> Flask:
             except Exception:
                 flash('Fecha o mes inválido.', 'danger')
                 return render_template('pagos_form.html', parcelas=parcelas, actividades=actividades, pago=pago)
-            if db.fetchone('SELECT 1 FROM pagos_parcelas WHERE parcela_id=? AND mes=? AND id<>? AND condominio_id = ?', (parcela_id, mes, pago_id, condominio_id)):
+            refs_ok, refs_msg = validar_referencias_condominio(db, condominio_id, parcela_id=parcela_id)
+            if not refs_ok:
+                flash(refs_msg, 'danger')
+            elif db.fetchone('SELECT 1 FROM pagos_parcelas WHERE parcela_id=? AND mes=? AND id<>? AND condominio_id = ?', (parcela_id, mes, pago_id, condominio_id)):
                 flash('Esa parcela ya tiene otro pago registrado para ese mes.', 'danger')
             else:
                 db.execute('UPDATE pagos_parcelas SET parcela_id=?, fecha=?, mes=?, monto=?, observacion=? WHERE id=? AND condominio_id = ?',
@@ -2732,6 +2747,10 @@ def create_app() -> Flask:
             except Exception:
                 flash('Fecha inválida.', 'danger')
                 return render_template('movimientos_form.html', actividades=actividades, parcelas=parcelas, movimiento=None)
+            refs_ok, refs_msg = validar_referencias_condominio(db, condominio_id, parcela_id=parcela_id, actividad_id=actividad_id)
+            if not refs_ok:
+                flash(refs_msg, 'danger')
+                return render_template('movimientos_form.html', actividades=actividades, parcelas=parcelas, movimiento=None)
             db.execute(
                 'INSERT INTO movimientos (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, origen, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, 'general', condominio_id),
@@ -2771,6 +2790,10 @@ def create_app() -> Flask:
                 validar_fecha(fecha)
             except Exception:
                 flash('Fecha inválida.', 'danger')
+                return render_template('movimientos_form.html', actividades=actividades, parcelas=parcelas, movimiento=movimiento)
+            refs_ok, refs_msg = validar_referencias_condominio(db, condominio_id, parcela_id=parcela_id, actividad_id=actividad_id)
+            if not refs_ok:
+                flash(refs_msg, 'danger')
                 return render_template('movimientos_form.html', actividades=actividades, parcelas=parcelas, movimiento=movimiento)
             db.execute('UPDATE movimientos SET fecha=?, tipo=?, concepto=?, monto=?, actividad_id=?, parcela_id=?, observacion=? WHERE id=? AND condominio_id = ?',
                        (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, movimiento_id, condominio_id))
@@ -3131,6 +3154,10 @@ def get_user_active_condominio_id(db: DBAdapter, user: Any, selected_condominio:
     condominios = get_user_condominios(db, user)
     if condominios:
         return int(condominios[0]['id'])
+    # Seguridad multi-condominio: un usuario autenticado sin condominios asignados
+    # no debe caer al condominio por defecto, porque eso filtraría datos de otro cliente.
+    if getattr(user, 'is_authenticated', False):
+        return None
     return get_default_condominio_id(db)
 
 
@@ -3148,6 +3175,20 @@ def get_current_condominio(db: DBAdapter):
     if condominio_id is None:
         return None
     return db.fetchone('SELECT * FROM condominios WHERE id = ?', (condominio_id,))
+
+
+def validar_referencias_condominio(db: DBAdapter, condominio_id: int | None, parcela_id: int | None = None, actividad_id: int | None = None) -> tuple[bool, str]:
+    if condominio_id is None:
+        return False, 'No hay condominio activo para esta operación.'
+    if parcela_id is not None:
+        parcela = db.fetchone('SELECT id FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id))
+        if not parcela:
+            return False, 'La parcela indicada no pertenece al condominio activo.'
+    if actividad_id is not None:
+        actividad = db.fetchone('SELECT id FROM actividades WHERE id = ? AND condominio_id = ?', (actividad_id, condominio_id))
+        if not actividad:
+            return False, 'La actividad indicada no pertenece al condominio activo.'
+    return True, ''
 
 
 def require_same_condominio(db: DBAdapter, table: str, row_id: int) -> bool:
@@ -3442,6 +3483,10 @@ def registrar_pago_parcela(db: DBAdapter, parcela_id: int, fecha: str, mes: str,
             (parcela_id, fecha, mes, monto, observacion, movimiento_id, get_current_condominio_id(db)),
         )
     else:
+        if actividad_id is not None:
+            actividad = db.fetchone('SELECT id FROM actividades WHERE id = ? AND condominio_id = ?', (actividad_id, get_current_condominio_id(db)))
+            if not actividad:
+                raise ValueError('Actividad no encontrada en el condominio activo')
         concepto = f'Ingreso extraordinario parcela: {parcela["nombre"]}'
         detalle = observacion if observacion else f'Ingreso extraordinario registrado en {mes}'
         db.execute(
