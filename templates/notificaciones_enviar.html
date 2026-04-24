@@ -17,6 +17,7 @@
     <div class="card border-0 shadow-sm">
       <div class="card-body p-4">
         <form method="post" class="vstack gap-3">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
           <div>
             <label class="form-label fw-semibold" for="titulo">Título</label>
             <input class="form-control form-control-lg" id="titulo" name="titulo" maxlength="90" required value="{{ form.get('titulo', '') }}" placeholder="Ej: Aviso importante">
