@@ -277,7 +277,7 @@ def send_fcm_to_tokens(app: Flask, tokens: list[str], title: str, body: str, dat
     return {'enabled': True, 'requested': len(clean_tokens), 'sent': sent, 'failed': failed, 'errors': errors[:5]}
 
 
-def get_active_push_tokens(db: DBAdapter, condominio_id: int | None, user_id: int | None = None, role: str | None = None) -> list[str]:
+def get_active_push_tokens(db: DBAdapter, condominio_id: int | None, user_id: int | None = None, role: str | None = None, parcela_id: int | None = None) -> list[str]:
     if not table_exists(db, 'push_tokens'):
         return []
     params: list[Any] = []
@@ -296,17 +296,67 @@ def get_active_push_tokens(db: DBAdapter, condominio_id: int | None, user_id: in
     if role:
         sql += ' AND u.role = ?'
         params.append(role)
+    if parcela_id is not None:
+        sql += ' AND u.parcela_id = ?'
+        params.append(parcela_id)
     rows = db.fetchall(sql, params)
     return [str(r['token']) for r in rows]
 
 
-def record_push_notification(db: DBAdapter, condominio_id: int | None, title: str, message: str, type_: str, created_by: str | None = None, target_role: str | None = None) -> None:
+def get_moroso_parcela_ids(db: DBAdapter, condominio_id: int | None, mes: str | None = None) -> list[int]:
+    """Parcelas activas con cuota mensual y sin pago suficiente para el mes indicado."""
+    if not table_exists(db, 'parcelas') or not table_exists(db, 'pagos_parcelas'):
+        return []
+    mes = (mes or datetime.now().strftime('%Y-%m')).strip()[:7]
+    params: list[Any] = [mes]
+    cond_filter = ''
+    if condominio_id is not None and column_exists(db, 'parcelas', 'condominio_id'):
+        cond_filter = ' AND a.condominio_id = ?'
+        params.append(condominio_id)
+    rows = db.fetchall(f"""
+        SELECT a.id, COALESCE(a.cuota_mensual, 0) AS cuota_mensual,
+               COALESCE(SUM(p.monto), 0) AS pagado
+        FROM parcelas a
+        LEFT JOIN pagos_parcelas p
+          ON p.parcela_id = a.id AND p.mes = ?
+        WHERE COALESCE(a.activo, 1) = 1
+          AND COALESCE(a.cuota_mensual, 0) > 0
+          {cond_filter}
+        GROUP BY a.id, a.cuota_mensual
+        HAVING COALESCE(SUM(p.monto), 0) < COALESCE(a.cuota_mensual, 0)
+    """, params)
+    return [int(r['id']) for r in rows]
+
+
+def get_push_tokens_for_parcelas(db: DBAdapter, condominio_id: int | None, parcela_ids: list[int]) -> list[str]:
+    if not parcela_ids:
+        return []
+    tokens: list[str] = []
+    for parcela_id in parcela_ids:
+        tokens.extend(get_active_push_tokens(db, condominio_id, parcela_id=int(parcela_id)))
+    return sorted(set(tokens))
+
+
+def record_push_notification(db: DBAdapter, condominio_id: int | None, title: str, message: str, type_: str, created_by: str | None = None, target_role: str | None = None, target_user_id: int | None = None, target_parcela_id: int | None = None, target_group: str | None = None) -> None:
     if not table_exists(db, 'notificaciones_push'):
         return
+    base_cols = ['condominio_id', 'titulo', 'mensaje', 'tipo', 'target_role', 'created_by', 'created_at']
+    values: list[Any] = [condominio_id, title, message, type_, target_role, created_by, datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+    optional = {
+        'target_user_id': target_user_id,
+        'target_parcela_id': target_parcela_id,
+        'target_group': target_group,
+    }
+    for col, value in optional.items():
+        if column_exists(db, 'notificaciones_push', col):
+            base_cols.append(col)
+            values.append(value)
+    placeholders = ', '.join(['?'] * len(base_cols))
     db.execute(
-        'INSERT INTO notificaciones_push (condominio_id, titulo, mensaje, tipo, target_role, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        (condominio_id, title, message, type_, target_role, created_by, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+        f"INSERT INTO notificaciones_push ({', '.join(base_cols)}) VALUES ({placeholders})",
+        values,
     )
+
 
 def migrate_legacy_parcelas_schema(db: DBAdapter) -> None:
     """Migra instalaciones antiguas basadas en alumnos/pagos_alumnos al esquema parcelas/pagos_parcelas."""
@@ -1797,41 +1847,100 @@ def create_app() -> Flask:
         db.commit()
         return api_response({'ok': True, 'message': 'Dispositivo desregistrado.'})
 
-    @app.post('/api/notificaciones/test')
-    @api_login_required
-    def api_push_test():
-        db = g.api_db
-        user = g.api_user
-        condominio_id = api_get_condominio_id(db, user)
-        title = 'Prueba de Parcelia'
-        body = 'Tus notificaciones push están configuradas correctamente.'
-        tokens = get_active_push_tokens(db, condominio_id, user_id=int(user.id))
-        result = send_fcm_to_tokens(app, tokens, title, body, {'type': 'test', 'screen': 'notificaciones'})
-        record_push_notification(db, condominio_id, title, body, 'test', user.nombre or user.username)
-        db.commit()
-        return api_response({'ok': True, 'message': 'Prueba de notificación procesada.', 'push': result})
+    def _api_can_send_business_notifications(user: User) -> bool:
+        role = (getattr(user, 'role', '') or '').lower()
+        return role in ('admin', 'presidente', 'tesorero', 'secretario', 'comite')
+
+    def _resolve_notification_target(db: DBAdapter, condominio_id: int | None, payload: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+        """Resuelve destinatarios de negocio sin exponer tokens a la app."""
+        destino = str(payload.get('destino') or payload.get('target') or 'todos').strip().lower()
+        role = str(payload.get('role') or payload.get('target_role') or '').strip() or None
+        user_id_raw = payload.get('user_id') or payload.get('usuario_id')
+        parcela_id_raw = payload.get('parcela_id')
+        mes = str(payload.get('mes') or datetime.now().strftime('%Y-%m')).strip()[:7]
+
+        meta: dict[str, Any] = {'destino': destino, 'role': role, 'mes': mes}
+        if destino in ('todos', 'all'):
+            return get_active_push_tokens(db, condominio_id), meta
+        if destino in ('rol', 'role'):
+            if not role or role not in ALLOWED_ROLES:
+                raise ValueError('Rol destino inválido.')
+            meta['target_role'] = role
+            return get_active_push_tokens(db, condominio_id, role=role), meta
+        if destino in ('usuario', 'user'):
+            user_id = int(user_id_raw or 0)
+            if user_id <= 0:
+                raise ValueError('Usuario destino inválido.')
+            meta['target_user_id'] = user_id
+            return get_active_push_tokens(db, condominio_id, user_id=user_id), meta
+        if destino in ('parcela', 'unidad', 'vivienda'):
+            parcela_id = int(parcela_id_raw or 0)
+            if parcela_id <= 0:
+                raise ValueError('Parcela destino inválida.')
+            meta['target_parcela_id'] = parcela_id
+            return get_active_push_tokens(db, condominio_id, parcela_id=parcela_id), meta
+        if destino in ('morosos', 'deudores', 'pagos_vencidos'):
+            parcela_ids = get_moroso_parcela_ids(db, condominio_id, mes=mes)
+            meta['target_group'] = 'morosos'
+            meta['parcela_count'] = len(parcela_ids)
+            return get_push_tokens_for_parcelas(db, condominio_id, parcela_ids), meta
+        raise ValueError('Destino inválido. Usa todos, rol, usuario, parcela o morosos.')
 
     @app.post('/api/notificaciones/enviar')
     @api_login_required
     def api_push_send_notice():
+        """Envía avisos de negocio desde un usuario autorizado. No es endpoint de pruebas."""
         db = g.api_db
         user = g.api_user
-        if (getattr(user, 'role', '') or '').lower() not in ('admin', 'presidente', 'tesorero', 'secretario', 'comite'):
+        if not _api_can_send_business_notifications(user):
             return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para enviar avisos.'}, 403)
         payload = request.get_json(silent=True) or {}
         title = str(payload.get('title') or payload.get('titulo') or '').strip()[:90]
-        body = str(payload.get('body') or payload.get('mensaje') or '').strip()[:240]
-        target_role = str(payload.get('role') or payload.get('target_role') or '').strip() or None
+        body = str(payload.get('body') or payload.get('mensaje') or '').strip()[:500]
+        tipo = str(payload.get('tipo') or 'aviso').strip()[:40] or 'aviso'
         if not title or not body:
             return api_response({'ok': False, 'error': 'invalid_notice', 'message': 'Debes indicar título y mensaje.'}, 400)
-        if target_role and target_role not in ALLOWED_ROLES:
-            return api_response({'ok': False, 'error': 'invalid_role', 'message': 'Rol destino inválido.'}, 400)
         condominio_id = api_get_condominio_id(db, user)
-        tokens = get_active_push_tokens(db, condominio_id, role=target_role)
-        result = send_fcm_to_tokens(app, tokens, title, body, {'type': 'aviso', 'screen': 'notificaciones'})
-        record_push_notification(db, condominio_id, title, body, 'aviso', user.nombre or user.username, target_role)
+        try:
+            tokens, target_meta = _resolve_notification_target(db, condominio_id, payload)
+        except Exception as exc:
+            return api_response({'ok': False, 'error': 'invalid_target', 'message': str(exc)}, 400)
+        result = send_fcm_to_tokens(app, tokens, title, body, {'type': tipo, 'screen': str(payload.get('screen') or 'notificaciones')})
+        record_push_notification(
+            db, condominio_id, title, body, tipo, user.nombre or user.username,
+            target_role=target_meta.get('target_role'),
+            target_user_id=target_meta.get('target_user_id'),
+            target_parcela_id=target_meta.get('target_parcela_id'),
+            target_group=target_meta.get('target_group'),
+        )
         db.commit()
-        return api_response({'ok': True, 'message': 'Aviso enviado.', 'push': result})
+        return api_response({'ok': True, 'message': 'Aviso enviado.', 'destino': target_meta, 'push': result})
+
+    @app.post('/api/admin/notificaciones/enviar')
+    @api_login_required
+    def api_admin_push_send_notice():
+        """Alias administrativo para automatizaciones y panel web/admin."""
+        return api_push_send_notice()
+
+    @app.post('/api/admin/notificaciones/morosos')
+    @api_login_required
+    def api_admin_push_morosos():
+        """Automatización de negocio: aviso a usuarios con gasto común pendiente del mes."""
+        db = g.api_db
+        user = g.api_user
+        if not _api_can_send_business_notifications(user):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para enviar avisos.'}, 403)
+        payload = request.get_json(silent=True) or {}
+        mes = str(payload.get('mes') or datetime.now().strftime('%Y-%m')).strip()[:7]
+        titulo = str(payload.get('titulo') or 'Gasto común pendiente').strip()[:90]
+        mensaje = str(payload.get('mensaje') or f'Tienes un gasto común pendiente correspondiente a {mes}.').strip()[:500]
+        condominio_id = api_get_condominio_id(db, user)
+        parcela_ids = get_moroso_parcela_ids(db, condominio_id, mes=mes)
+        tokens = get_push_tokens_for_parcelas(db, condominio_id, parcela_ids)
+        result = send_fcm_to_tokens(app, tokens, titulo, mensaje, {'type': 'pago_vencido', 'screen': 'finanzas', 'mes': mes})
+        record_push_notification(db, condominio_id, titulo, mensaje, 'pago_vencido', user.nombre or user.username, target_group='morosos')
+        db.commit()
+        return api_response({'ok': True, 'message': 'Aviso a morosos procesado.', 'mes': mes, 'parcelas_morosas': len(parcela_ids), 'push': result})
 
     @app.get('/api/notificaciones')
     @api_login_required
@@ -1844,14 +1953,29 @@ def create_app() -> Flask:
         items: list[dict[str, Any]] = []
 
         if table_exists(db, 'notificaciones_push'):
-            push_rows = db.fetchall("""
+            target_filters = ['(condominio_id = ? OR condominio_id IS NULL)', '(target_role IS NULL OR target_role = ?)']
+            params: list[Any] = [condominio_id, getattr(user, 'role', None)]
+            if column_exists(db, 'notificaciones_push', 'target_user_id'):
+                target_filters.append('(target_user_id IS NULL OR target_user_id = ?)')
+                params.append(int(user.id))
+            if column_exists(db, 'notificaciones_push', 'target_parcela_id'):
+                target_filters.append('(target_parcela_id IS NULL OR target_parcela_id = ?)')
+                params.append(int(user.parcela_id) if getattr(user, 'parcela_id', None) else -1)
+            # Los avisos de grupo (ej. morosos) quedan visibles solo si el usuario ya tiene deuda/pago pendiente.
+            if column_exists(db, 'notificaciones_push', 'target_group'):
+                target_filters.append("(target_group IS NULL OR target_group <> 'morosos' OR ? = 1)")
+                try:
+                    is_moroso = int(user.parcela_id) in get_moroso_parcela_ids(db, condominio_id, current_month) if getattr(user, 'parcela_id', None) else False
+                except Exception:
+                    is_moroso = False
+                params.append(1 if is_moroso else 0)
+            push_rows = db.fetchall(f"""
                 SELECT id, titulo, mensaje, tipo, created_at
                 FROM notificaciones_push
-                WHERE (condominio_id = ? OR condominio_id IS NULL)
-                  AND (target_role IS NULL OR target_role = ?)
+                WHERE {' AND '.join(target_filters)}
                 ORDER BY created_at DESC, id DESC
                 LIMIT 20
-                """, (condominio_id, getattr(user, 'role', None)))
+                """, params)
             for r in push_rows:
                 items.append({
                     'id': 'push-' + str(r['id']),
@@ -1859,7 +1983,7 @@ def create_app() -> Flask:
                     'title': r['titulo'],
                     'message': r['mensaje'],
                     'date': str(r['created_at'] or '')[:10],
-                    'urgent': False,
+                    'urgent': str(r['tipo'] or '') in ('pago_vencido', 'seguridad'),
                 })
 
         cuota_sql = 'SELECT COALESCE(SUM(cuota_mensual), 0) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?'
@@ -4729,10 +4853,10 @@ def init_db(db: DBAdapter) -> None:
         db.commit()
         if db.kind == 'postgres':
             db.execute('''CREATE TABLE IF NOT EXISTS push_tokens (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, condominio_id BIGINT, token TEXT NOT NULL UNIQUE, platform TEXT, device_name TEXT, activo INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id BIGSERIAL PRIMARY KEY, condominio_id BIGINT, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id BIGSERIAL PRIMARY KEY, condominio_id BIGINT, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, target_user_id BIGINT, target_parcela_id BIGINT, target_group TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
         else:
             db.execute('''CREATE TABLE IF NOT EXISTS push_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, condominio_id INTEGER, token TEXT NOT NULL UNIQUE, platform TEXT, device_name TEXT, activo INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id INTEGER PRIMARY KEY AUTOINCREMENT, condominio_id INTEGER, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id INTEGER PRIMARY KEY AUTOINCREMENT, condominio_id INTEGER, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, target_user_id INTEGER, target_parcela_id INTEGER, target_group TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
         db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_condominio ON push_tokens(condominio_id)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_notificaciones_push_condominio ON notificaciones_push(condominio_id, created_at)')
@@ -4763,6 +4887,9 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE actas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE actividades ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE ciclos_cobranza ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE notificaciones_push ADD COLUMN IF NOT EXISTS target_user_id BIGINT',
+            'ALTER TABLE notificaciones_push ADD COLUMN IF NOT EXISTS target_parcela_id BIGINT',
+            'ALTER TABLE notificaciones_push ADD COLUMN IF NOT EXISTS target_group TEXT',
         ]
     else:
         migration_statements = [
@@ -4785,6 +4912,9 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE actas ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE actividades ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE ciclos_cobranza ADD COLUMN condominio_id INTEGER',
+            'ALTER TABLE notificaciones_push ADD COLUMN target_user_id INTEGER',
+            'ALTER TABLE notificaciones_push ADD COLUMN target_parcela_id INTEGER',
+            'ALTER TABLE notificaciones_push ADD COLUMN target_group TEXT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
