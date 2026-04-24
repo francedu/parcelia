@@ -857,7 +857,9 @@ def create_app() -> Flask:
             'parcela_id': user.parcela_id,
             'must_change_password': bool(getattr(user, 'must_change_password', False)),
             'demo_mode': bool(getattr(user, 'is_demo_db', False)),
+            'can_manage_finance': bool(getattr(user, 'can_manage_finance', lambda: False)()),
             'can_manage_votaciones': api_can_manage_votaciones(user),
+            'can_view_all_parcelas': not api_user_should_be_limited_to_own_parcela(user),
         }
 
     def api_can_manage_votaciones(user: User) -> bool:
@@ -1114,7 +1116,7 @@ def create_app() -> Flask:
         actividad_id = int(actividad_id) if str(actividad_id or '').isdigit() else None
         parcela_id = int(parcela_id) if str(parcela_id or '').isdigit() else None
 
-        if getattr(user, 'parcela_id', None):
+        if api_user_should_be_limited_to_own_parcela(user):
             parcela_id = int(user.parcela_id)
 
         if parcela_id is not None:
@@ -1403,7 +1405,7 @@ def create_app() -> Flask:
         db = g.api_db
         user = g.api_user
         condominio_id = api_get_condominio_id(db, user)
-        if getattr(user, 'parcela_id', None):
+        if api_user_should_be_limited_to_own_parcela(user):
             parcela_id = int(user.parcela_id)
 
         parcela = db.fetchone(
@@ -1500,7 +1502,7 @@ def create_app() -> Flask:
         actividad_id = int(actividad_id) if str(actividad_id or '').isdigit() else None
         parcela_id = int(parcela_id) if str(parcela_id or '').isdigit() else None
 
-        if getattr(user, 'parcela_id', None):
+        if api_user_should_be_limited_to_own_parcela(user):
             parcela_id = int(user.parcela_id)
         if parcela_id is not None:
             parcela = db.fetchone('SELECT id, nombre FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id))
