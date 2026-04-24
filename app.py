@@ -858,6 +858,7 @@ def create_app() -> Flask:
             'must_change_password': bool(getattr(user, 'must_change_password', False)),
             'demo_mode': bool(getattr(user, 'is_demo_db', False)),
             'can_manage_finance': bool(getattr(user, 'can_manage_finance', lambda: False)()),
+            'can_manage_actas': bool(getattr(user, 'can_manage_actas', lambda: False)()),
             'can_manage_votaciones': api_can_manage_votaciones(user),
             'can_view_all_parcelas': not api_user_should_be_limited_to_own_parcela(user),
         }
@@ -1560,6 +1561,124 @@ def create_app() -> Flask:
         db.commit()
         return api_response({'ok': True, 'message': 'Pago registrado correctamente.'}, 201)
 
+
+
+    @app.get('/api/estado-cuenta')
+    @api_login_required
+    def api_estado_cuenta():
+        """Estado de cuenta móvil: pagos, cuota esperada y deuda estimada del mes."""
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        current_month = datetime.now().strftime('%Y-%m')
+        cuota_params_scope: list[Any] = [condominio_id]
+        pago_params_scope: list[Any] = [condominio_id]
+        cuota_filter = ''
+        pago_filter = ''
+        if api_user_should_be_limited_to_own_parcela(user):
+            cuota_filter = ' AND id = ?'
+            pago_filter = ' AND parcela_id = ?'
+            cuota_params_scope.append(int(user.parcela_id))
+            pago_params_scope.append(int(user.parcela_id))
+
+        cuota_row = db.fetchone(
+            'SELECT COALESCE(SUM(cuota_mensual), 0) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?' + cuota_filter,
+            cuota_params_scope,
+        )
+        pagos_mes_row = db.fetchone(
+            'SELECT COALESCE(SUM(monto), 0) AS total, COUNT(*) AS count FROM pagos_parcelas WHERE condominio_id = ? AND mes = ?' + pago_filter,
+            [condominio_id, current_month] + ([int(user.parcela_id)] if api_user_should_be_limited_to_own_parcela(user) else []),
+        )
+        pagos_total_row = db.fetchone(
+            'SELECT COALESCE(SUM(monto), 0) AS total, COUNT(*) AS count FROM pagos_parcelas WHERE condominio_id = ?' + pago_filter,
+            pago_params_scope,
+        )
+
+        rows = db.fetchall(
+            """
+            SELECT p.id, p.parcela_id, a.nombre AS parcela_nombre, a.curso,
+                   p.fecha, p.mes, p.monto, p.observacion, p.movimiento_id
+            FROM pagos_parcelas p
+            INNER JOIN parcelas a ON a.id = p.parcela_id AND a.condominio_id = p.condominio_id
+            WHERE p.condominio_id = ?
+            """ + (' AND p.parcela_id = ?' if api_user_should_be_limited_to_own_parcela(user) else '') + " ORDER BY p.fecha DESC, p.id DESC LIMIT 20",
+            [condominio_id] + ([int(user.parcela_id)] if api_user_should_be_limited_to_own_parcela(user) else []),
+        )
+        items = []
+        for r in rows:
+            item = dict(r)
+            item['monto'] = float(item.get('monto') or 0)
+            items.append(item)
+        cuota = float((cuota_row['total'] if cuota_row else 0) or 0)
+        pagado_mes = float((pagos_mes_row['total'] if pagos_mes_row else 0) or 0)
+        pagado_total = float((pagos_total_row['total'] if pagos_total_row else 0) or 0)
+        pagos_count = int((pagos_total_row['count'] if pagos_total_row else 0) or 0)
+        return api_response({
+            'ok': True,
+            'items': items,
+            'summary': {
+                'mes': current_month,
+                'total_pagado_mes': pagado_mes,
+                'total_pagado_historico': pagado_total,
+                'cuota_mensual_esperada': cuota,
+                'deuda_estimada': max(cuota - pagado_mes, 0),
+                'pagos_registrados': pagos_count,
+            },
+        })
+
+    @app.get('/api/notificaciones')
+    @api_login_required
+    def api_notificaciones():
+        """Avisos móviles derivados de pagos, actas y salud financiera."""
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        current_month = datetime.now().strftime('%Y-%m')
+        items: list[dict[str, Any]] = []
+
+        cuota_sql = 'SELECT COALESCE(SUM(cuota_mensual), 0) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?'
+        cuota_params: list[Any] = [condominio_id]
+        pago_sql = 'SELECT COALESCE(SUM(monto), 0) AS total FROM pagos_parcelas WHERE condominio_id = ? AND mes = ?'
+        pago_params: list[Any] = [condominio_id, current_month]
+        if api_user_should_be_limited_to_own_parcela(user):
+            cuota_sql += ' AND id = ?'
+            cuota_params.append(int(user.parcela_id))
+            pago_sql += ' AND parcela_id = ?'
+            pago_params.append(int(user.parcela_id))
+        cuota = float(((db.fetchone(cuota_sql, cuota_params) or {}).get('total') if hasattr((db.fetchone(cuota_sql, cuota_params) or {}), 'get') else 0) or 0)
+        pago_row = db.fetchone(pago_sql, pago_params)
+        pagado = float((pago_row['total'] if pago_row else 0) or 0)
+        if cuota > 0 and pagado < cuota:
+            items.append({
+                'id': 'pago-' + current_month,
+                'type': 'pago',
+                'title': 'Pago pendiente del mes',
+                'message': 'Hay gastos comunes pendientes por ' + ('$' + f'{(cuota - pagado):,.0f}'.replace(',', '.')) + '.',
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'urgent': True,
+            })
+
+        actas = db.fetchall('SELECT id, titulo, fecha, estado FROM actas WHERE condominio_id = ? ORDER BY fecha DESC, id DESC LIMIT 3', (condominio_id,))
+        for acta in actas:
+            items.append({
+                'id': 'acta-' + str(acta['id']),
+                'type': 'acta',
+                'title': 'Acta disponible: ' + str(acta['titulo']),
+                'message': 'Revisa los acuerdos y responsables registrados.',
+                'date': acta['fecha'],
+                'urgent': False,
+            })
+
+        if getattr(user, 'must_change_password', False):
+            items.insert(0, {
+                'id': 'seguridad-password',
+                'type': 'seguridad',
+                'title': 'Actualiza tu contraseña',
+                'message': 'Por seguridad debes cambiar tu contraseña temporal.',
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'urgent': True,
+            })
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
 
     @app.get('/api/parcelas/<int:parcela_id>')
     @api_login_required
