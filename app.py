@@ -980,7 +980,7 @@ def create_app() -> Flask:
                     COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto END), 0) AS gastos_mes,
                     COUNT(*) AS movimientos_mes
                 FROM movimientos
-                WHERE to_char(fecha, 'YYYY-MM') = ? AND condominio_id = ?
+                WHERE substring(fecha::text, 1, 7) = ? AND condominio_id = ?
                 """,
                 (current_month, condominio_id),
             )
