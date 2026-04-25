@@ -1453,15 +1453,27 @@ def create_app() -> Flask:
         db.commit()
         return api_response({'ok': True, 'message': 'Voto registrado correctamente.', 'opcion_id': opcion_id, 'opcion_texto': opcion['texto']})
 
+    def serialize_acta_row(row: Any, can_manage: bool = False) -> dict[str, Any]:
+        item = dict(row)
+        # Normalizar campos esperados por Flutter. Algunas actas antiguas pueden traer NULL.
+        for key in ('titulo', 'fecha', 'estado', 'lugar', 'hora_inicio', 'hora_termino', 'asistentes', 'temas', 'desarrollo', 'acuerdos', 'responsables', 'observaciones', 'created_by', 'updated_at'):
+            if item.get(key) is None:
+                item[key] = ''
+        item['can_manage'] = can_manage
+        return item
+
     @app.get('/api/actas')
     @api_login_required
     def api_actas():
         db = g.api_db
         user = g.api_user
         condominio_id = api_get_condominio_id(db, user)
+        can_manage = bool(getattr(user, 'can_manage_actas', lambda: False)())
         rows = db.fetchall(
             """
-            SELECT id, titulo, fecha, estado
+            SELECT id, titulo, fecha, lugar, hora_inicio, hora_termino,
+                   asistentes, temas, desarrollo, acuerdos, responsables,
+                   observaciones, estado, created_by, updated_at, condominio_id
             FROM actas
             WHERE condominio_id = ?
             ORDER BY fecha DESC, id DESC
@@ -1469,7 +1481,8 @@ def create_app() -> Flask:
             """,
             (condominio_id,),
         )
-        return api_response({'ok': True, 'items': [dict(r) for r in rows], 'count': len(rows)})
+        items = [serialize_acta_row(r, can_manage) for r in rows]
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
 
     @app.post('/api/votaciones')
     @api_login_required
@@ -1613,13 +1626,22 @@ def create_app() -> Flask:
     @api_login_required
     def api_acta_detail(acta_id: int):
         db = g.api_db
-        condominio_id = api_get_condominio_id(db, g.api_user)
-        row = db.fetchone('SELECT * FROM actas WHERE id = ? AND condominio_id = ?', (acta_id, condominio_id))
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        row = db.fetchone(
+            """
+            SELECT id, titulo, fecha, lugar, hora_inicio, hora_termino,
+                   asistentes, temas, desarrollo, acuerdos, responsables,
+                   observaciones, estado, created_by, updated_at, condominio_id
+            FROM actas
+            WHERE id = ? AND condominio_id = ?
+            """,
+            (acta_id, condominio_id),
+        )
         if not row:
             return api_response({'ok': False, 'error': 'not_found', 'message': 'Acta/minuta no encontrada.'}, 404)
-        item = dict(row)
-        item['can_manage'] = bool(getattr(g.api_user, 'can_manage_actas', lambda: False)())
-        return api_response({'ok': True, 'item': item})
+        can_manage = bool(getattr(user, 'can_manage_actas', lambda: False)())
+        return api_response({'ok': True, 'item': serialize_acta_row(row, can_manage)})
 
     @app.post('/api/actas')
     @api_login_required
