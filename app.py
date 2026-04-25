@@ -9,8 +9,17 @@ import subprocess
 import ssl
 from datetime import datetime, timedelta
 from functools import wraps
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pathlib import Path
 from typing import Any
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except Exception:
+    firebase_admin = None
+    credentials = None
+    messaging = None
 from urllib.parse import urlparse
 
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -199,6 +208,156 @@ def column_exists(db: DBAdapter, table_name: str, column_name: str) -> bool:
         return False
 
 
+
+
+def firebase_push_enabled() -> bool:
+    return firebase_admin is not None and messaging is not None and bool(os.environ.get('FIREBASE_PROJECT_ID') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON'))
+
+
+def init_firebase_admin(app: Flask) -> bool:
+    """Inicializa Firebase Admin SDK una sola vez. Soporta GOOGLE_APPLICATION_CREDENTIALS o JSON en env."""
+    if firebase_admin is None or messaging is None:
+        return False
+    try:
+        if firebase_admin._apps:
+            return True
+        project_id = os.environ.get('FIREBASE_PROJECT_ID') or None
+        service_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON')
+        if service_json and credentials is not None:
+            import json as _json
+            cred = credentials.Certificate(_json.loads(service_json))
+            firebase_admin.initialize_app(cred, {'projectId': project_id} if project_id else None)
+        elif os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+            firebase_admin.initialize_app(options={'projectId': project_id} if project_id else None)
+        else:
+            return False
+        return True
+    except Exception:
+        app.logger.exception('No se pudo inicializar Firebase Admin SDK')
+        return False
+
+
+def push_platform_from_user_agent() -> str:
+    ua = (request.headers.get('User-Agent') or '').lower()
+    if 'android' in ua:
+        return 'android'
+    if 'iphone' in ua or 'ipad' in ua or 'ios' in ua:
+        return 'ios'
+    if 'mac' in ua:
+        return 'macos'
+    if 'windows' in ua:
+        return 'windows'
+    return 'unknown'
+
+
+def send_fcm_to_tokens(app: Flask, tokens: list[str], title: str, body: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    clean_tokens = [t.strip() for t in tokens if t and str(t).strip()]
+    if not clean_tokens:
+        return {'enabled': firebase_push_enabled(), 'requested': 0, 'sent': 0, 'failed': 0}
+    if not init_firebase_admin(app):
+        return {'enabled': False, 'requested': len(clean_tokens), 'sent': 0, 'failed': 0, 'message': 'Firebase Admin no configurado'}
+    sent = 0
+    failed = 0
+    errors: list[str] = []
+    payload_data = {str(k): str(v) for k, v in (data or {}).items() if v is not None}
+    for token in clean_tokens:
+        try:
+            msg = messaging.Message(
+                token=token,
+                notification=messaging.Notification(title=title, body=body),
+                data=payload_data,
+                android=messaging.AndroidConfig(priority='high'),
+                apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.Aps(sound='default'))),
+            )
+            messaging.send(msg)
+            sent += 1
+        except Exception as exc:
+            failed += 1
+            errors.append(str(exc)[:180])
+    return {'enabled': True, 'requested': len(clean_tokens), 'sent': sent, 'failed': failed, 'errors': errors[:5]}
+
+
+def get_active_push_tokens(db: DBAdapter, condominio_id: int | None, user_id: int | None = None, role: str | None = None, parcela_id: int | None = None) -> list[str]:
+    if not table_exists(db, 'push_tokens'):
+        return []
+    params: list[Any] = []
+    sql = """
+        SELECT DISTINCT pt.token
+        FROM push_tokens pt
+        INNER JOIN usuarios u ON u.id = pt.user_id
+        WHERE pt.activo = 1 AND u.activo = 1
+    """
+    if condominio_id is not None:
+        sql += ' AND (pt.condominio_id = ? OR pt.condominio_id IS NULL)'
+        params.append(condominio_id)
+    if user_id is not None:
+        sql += ' AND pt.user_id = ?'
+        params.append(user_id)
+    if role:
+        sql += ' AND u.role = ?'
+        params.append(role)
+    if parcela_id is not None:
+        sql += ' AND u.parcela_id = ?'
+        params.append(parcela_id)
+    rows = db.fetchall(sql, params)
+    return [str(r['token']) for r in rows]
+
+
+def get_moroso_parcela_ids(db: DBAdapter, condominio_id: int | None, mes: str | None = None) -> list[int]:
+    """Parcelas activas con cuota mensual y sin pago suficiente para el mes indicado."""
+    if not table_exists(db, 'parcelas') or not table_exists(db, 'pagos_parcelas'):
+        return []
+    mes = (mes or datetime.now().strftime('%Y-%m')).strip()[:7]
+    params: list[Any] = [mes]
+    cond_filter = ''
+    if condominio_id is not None and column_exists(db, 'parcelas', 'condominio_id'):
+        cond_filter = ' AND a.condominio_id = ?'
+        params.append(condominio_id)
+    rows = db.fetchall(f"""
+        SELECT a.id, COALESCE(a.cuota_mensual, 0) AS cuota_mensual,
+               COALESCE(SUM(p.monto), 0) AS pagado
+        FROM parcelas a
+        LEFT JOIN pagos_parcelas p
+          ON p.parcela_id = a.id AND p.mes = ?
+        WHERE COALESCE(a.activo, 1) = 1
+          AND COALESCE(a.cuota_mensual, 0) > 0
+          {cond_filter}
+        GROUP BY a.id, a.cuota_mensual
+        HAVING COALESCE(SUM(p.monto), 0) < COALESCE(a.cuota_mensual, 0)
+    """, params)
+    return [int(r['id']) for r in rows]
+
+
+def get_push_tokens_for_parcelas(db: DBAdapter, condominio_id: int | None, parcela_ids: list[int]) -> list[str]:
+    if not parcela_ids:
+        return []
+    tokens: list[str] = []
+    for parcela_id in parcela_ids:
+        tokens.extend(get_active_push_tokens(db, condominio_id, parcela_id=int(parcela_id)))
+    return sorted(set(tokens))
+
+
+def record_push_notification(db: DBAdapter, condominio_id: int | None, title: str, message: str, type_: str, created_by: str | None = None, target_role: str | None = None, target_user_id: int | None = None, target_parcela_id: int | None = None, target_group: str | None = None) -> None:
+    if not table_exists(db, 'notificaciones_push'):
+        return
+    base_cols = ['condominio_id', 'titulo', 'mensaje', 'tipo', 'target_role', 'created_by', 'created_at']
+    values: list[Any] = [condominio_id, title, message, type_, target_role, created_by, datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+    optional = {
+        'target_user_id': target_user_id,
+        'target_parcela_id': target_parcela_id,
+        'target_group': target_group,
+    }
+    for col, value in optional.items():
+        if column_exists(db, 'notificaciones_push', col):
+            base_cols.append(col)
+            values.append(value)
+    placeholders = ', '.join(['?'] * len(base_cols))
+    db.execute(
+        f"INSERT INTO notificaciones_push ({', '.join(base_cols)}) VALUES ({placeholders})",
+        values,
+    )
+
+
 def migrate_legacy_parcelas_schema(db: DBAdapter) -> None:
     """Migra instalaciones antiguas basadas en alumnos/pagos_alumnos al esquema parcelas/pagos_parcelas."""
     try:
@@ -261,6 +420,7 @@ def migrate_legacy_parcelas_schema(db: DBAdapter) -> None:
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    init_firebase_admin(app)
     debug_enabled = os.environ.get('APP_DEBUG', '0') == '1'
     secret_key = os.environ.get('SECRET_KEY', '').strip()
     if not secret_key:
@@ -307,6 +467,8 @@ def create_app() -> Flask:
     app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=session_lifetime_minutes)
     app.config['INACTIVITY_TIMEOUT_SECONDS'] = inactivity_timeout_minutes * 60
     app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH_MB', '16')) * 1024 * 1024
+    app.config['API_TOKEN_MAX_AGE_SECONDS'] = int(os.environ.get('API_TOKEN_MAX_AGE_SECONDS', str(60 * 60 * 24 * 7)))
+    app.config['API_ALLOWED_ORIGINS'] = [o.strip() for o in os.environ.get('API_ALLOWED_ORIGINS', '*').split(',') if o.strip()]
 
     if os.environ.get('TRUST_PROXY', '1') == '1':
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -317,6 +479,21 @@ def create_app() -> Flask:
     login_manager.login_message_category = 'warning'
     login_manager.init_app(app)
 
+    def api_serializer() -> URLSafeTimedSerializer:
+        return URLSafeTimedSerializer(app.config['SECRET_KEY'], salt='parcelia-mobile-api')
+
+    def generate_api_token(user: User) -> str:
+        return api_serializer().dumps({
+            'uid': int(user.id.split(':')[-1]) if ':' in user.id else int(user.id),
+            'mode': 'demo' if getattr(user, 'is_demo_db', False) else 'prod',
+            'role': user.role,
+        })
+
+    def decode_api_token(token: str) -> dict[str, Any]:
+        max_age = int(app.config.get('API_TOKEN_MAX_AGE_SECONDS', 0) or 0)
+        kwargs = {'max_age': max_age} if max_age > 0 else {}
+        return api_serializer().loads(token, **kwargs)
+
     def generate_csrf_token() -> str:
         token = session.get('_csrf_token')
         if not token:
@@ -325,6 +502,8 @@ def create_app() -> Flask:
         return token
 
     def validate_csrf() -> None:
+        if request.path.startswith('/api/'):
+            return
         if request.method in {'GET', 'HEAD', 'OPTIONS', 'TRACE'}:
             return
         provided_token = (
@@ -394,6 +573,8 @@ def create_app() -> Flask:
 
     @login_manager.unauthorized_handler
     def unauthorized():
+        if request.path.startswith('/api/'):
+            return {'ok': False, 'error': 'auth_required', 'message': 'Debes autenticarte para usar la API.'}, 401
         flash('Inicia sesión para continuar.', 'warning')
         return redirect(url_for('login', next=request.full_path if request.full_path.startswith('/') else request.path))
 
@@ -757,6 +938,1399 @@ def create_app() -> Flask:
             app.logger.exception('Health check failed')
             return {'status': 'error', 'detail': str(exc)}, 500
 
+    def api_response(payload: dict[str, Any], status: int = 200, headers: dict[str, str] | None = None):
+        response = app.response_class(
+            response=app.json.dumps(payload),
+            status=status,
+            mimetype='application/json',
+        )
+        origin = request.headers.get('Origin', '').strip()
+        allowed_origins = app.config.get('API_ALLOWED_ORIGINS', ['*'])
+        if '*' in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin or '*'
+        elif origin and origin in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        if headers:
+            for k, v in headers.items():
+                response.headers[k] = v
+        return response
+
+    def api_preflight_response():
+        return api_response({'ok': True}, 200)
+
+    def api_get_token_from_request() -> str:
+        auth = request.headers.get('Authorization', '').strip()
+        if auth.lower().startswith('bearer '):
+            return auth[7:].strip()
+        return request.headers.get('X-API-Token', '').strip()
+
+    def load_api_user_from_token() -> User | None:
+        token = api_get_token_from_request()
+        if not token:
+            return None
+        try:
+            payload = decode_api_token(token)
+        except (SignatureExpired, BadSignature):
+            return None
+        mode = payload.get('mode', 'prod')
+        db_url = str(DEMO_DB_PATH) if mode == 'demo' else app.config['DATABASE']
+        db = DBAdapter(db_url)
+        try:
+            row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.id = ? AND u.activo = 1', (int(payload['uid']),))
+            if not row:
+                return None
+            return User(row, is_demo_db=(mode == 'demo'))
+        finally:
+            db.close()
+
+    def api_login_required(view_func):
+        @wraps(view_func)
+        def wrapped(*args, **kwargs):
+            user = load_api_user_from_token()
+            if user is None:
+                return api_response({'ok': False, 'error': 'invalid_token', 'message': 'Token ausente, inválido o expirado.'}, 401)
+            g.api_user = user
+            g.api_db = DBAdapter(str(DEMO_DB_PATH) if getattr(user, 'is_demo_db', False) else app.config['DATABASE'])
+            try:
+                return view_func(*args, **kwargs)
+            finally:
+                db = g.pop('api_db', None)
+                if db is not None:
+                    db.close()
+                g.pop('api_user', None)
+        return wrapped
+
+    def api_user_to_dict(user: User) -> dict[str, Any]:
+        return {
+            'id': int(user.id.split(':')[-1]) if ':' in user.id else int(user.id),
+            'username': user.username,
+            'nombre': user.nombre,
+            'role': user.role,
+            'role_label': user.role_label,
+            'activo': bool(user.activo),
+            'condominio_id': user.condominio_id,
+            'condominio_nombre': user.condominio_nombre,
+            'parcela_id': user.parcela_id,
+            'must_change_password': bool(getattr(user, 'must_change_password', False)),
+            'demo_mode': bool(getattr(user, 'is_demo_db', False)),
+            'can_manage_finance': bool(getattr(user, 'can_manage_finance', lambda: False)()),
+            'can_manage_actas': bool(getattr(user, 'can_manage_actas', lambda: False)()),
+            'can_manage_votaciones': api_can_manage_votaciones(user),
+            'can_view_all_parcelas': not api_user_should_be_limited_to_own_parcela(user),
+        }
+
+    def api_can_manage_votaciones(user: User) -> bool:
+        role = (getattr(user, 'role', '') or '').strip().lower()
+        return role in ('admin', 'presidente', 'secretario') or bool(getattr(user, 'can_manage_actas', lambda: False)())
+
+
+    def api_user_should_be_limited_to_own_parcela(user: User) -> bool:
+        """Solo limita la API a una parcela cuando el usuario es realmente de vista individual."""
+        if not getattr(user, 'parcela_id', None):
+            return False
+        role = (getattr(user, 'role', '') or '').strip().lower()
+        if role in ('admin', 'presidente', 'tesorero', 'secretario', 'comite', 'propietario'):
+            return False
+        if getattr(user, 'can_manage_finance', lambda: False)():
+            return False
+        return True
+
+    def api_get_condominio_id(db: DBAdapter, user: User) -> int | None:
+        selected = request.args.get('condominio_id', '').strip()
+        if getattr(user, 'is_global_admin', lambda: False)():
+            # Super admin puede cambiar de condominio explícitamente; si no selecciona,
+            # usamos uno por defecto para evitar endpoints globales sin filtro.
+            return int(selected) if selected.isdigit() else get_default_condominio_id(db)
+        if getattr(user, 'condominio_id', None):
+            return int(user.condominio_id)
+        # Seguridad: un usuario autenticado sin condominio asignado no debe heredar
+        # el condominio por defecto porque filtraría datos de otro cliente.
+        return None
+
+    @app.route('/api/<path:_path>', methods=['OPTIONS'])
+    def api_options(_path: str):
+        return api_preflight_response()
+
+    @app.get('/api/health')
+    def api_health():
+        try:
+            db = get_db()
+            row = db.fetchone('SELECT 1 AS ok')
+            return api_response({'ok': True, 'status': 'ok', 'db': int(row['ok'] if row else 0), 'version': '1.0'})
+        except Exception as exc:
+            app.logger.exception('API health check failed')
+            return api_response({'ok': False, 'error': 'health_error', 'message': str(exc)}, 500)
+
+    @app.post('/api/auth/login')
+    def api_auth_login():
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get('username', '')).strip().lower()
+        password = str(payload.get('password', ''))
+        mode = str(payload.get('mode', '')).strip().lower()
+        is_demo_login = mode == 'demo' or username in {'demo@parcelia.cl', 'comite@parcelia.cl'}
+        db = DBAdapter(str(DEMO_DB_PATH) if is_demo_login else app.config['DATABASE'])
+        try:
+            row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE lower(u.username) = ? AND u.activo = 1', (username,))
+            if not row or not check_password_hash(row['password_hash'], password):
+                return api_response({'ok': False, 'error': 'invalid_credentials', 'message': 'Usuario o contraseña incorrectos.'}, 401)
+            user = User(row, is_demo_db=is_demo_login)
+            return api_response({
+                'ok': True,
+                'token': generate_api_token(user),
+                'token_type': 'Bearer',
+                'expires_in': int(app.config.get('API_TOKEN_MAX_AGE_SECONDS', 0) or 0),
+                'user': api_user_to_dict(user),
+                'must_change_password': bool(user.needs_password_change()),
+            })
+        finally:
+            db.close()
+
+    @app.get('/api/me')
+    @api_login_required
+    def api_me():
+        return api_response({'ok': True, 'user': api_user_to_dict(g.api_user)})
+
+    @app.post('/api/auth/change-password')
+    @api_login_required
+    def api_change_password():
+        payload = request.get_json(silent=True) or {}
+        current_password = str(payload.get('current_password', ''))
+        new_password = str(payload.get('new_password', ''))
+        confirm_password = str(payload.get('confirm_password', ''))
+        user = g.api_user
+        db = g.api_db
+        if not check_password_hash(user.password_hash, current_password):
+            return api_response({'ok': False, 'error': 'invalid_current_password', 'message': 'La contraseña actual no es correcta.'}, 400)
+        if len(new_password) < 8:
+            return api_response({'ok': False, 'error': 'weak_password', 'message': 'La nueva contraseña debe tener al menos 8 caracteres.'}, 400)
+        if new_password != confirm_password:
+            return api_response({'ok': False, 'error': 'password_mismatch', 'message': 'La confirmación no coincide.'}, 400)
+        if current_password == new_password:
+            return api_response({'ok': False, 'error': 'password_reused', 'message': 'La nueva contraseña debe ser distinta a la actual.'}, 400)
+        user_id = int(user.id.split(':')[-1]) if ':' in user.id else int(user.id)
+        db.execute('UPDATE usuarios SET password_hash = ?, must_change_password = 0 WHERE id = ?', (generate_password_hash(new_password), user_id))
+        db.commit()
+        fresh_row = db.fetchone('SELECT u.*, c.nombre AS condominio_nombre FROM usuarios u LEFT JOIN condominios c ON c.id = u.condominio_id WHERE u.id = ?', (user_id,))
+        fresh_user = User(fresh_row, is_demo_db=getattr(user, 'is_demo_db', False)) if fresh_row else user
+        return api_response({'ok': True, 'message': 'Contraseña actualizada correctamente.', 'user': api_user_to_dict(fresh_user), 'token': generate_api_token(fresh_user)})
+
+    @app.get('/api/dashboard')
+    @api_login_required
+    def api_dashboard():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        current_month = datetime.now().strftime('%Y-%m')
+        if db.kind == 'sqlite':
+            resumen_mes = db.fetchone(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto END), 0) AS ingresos_mes,
+                    COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto END), 0) AS gastos_mes,
+                    COUNT(*) AS movimientos_mes
+                FROM movimientos
+                WHERE strftime('%Y-%m', fecha) = ? AND condominio_id = ?
+                """,
+                (current_month, condominio_id),
+            )
+        else:
+            resumen_mes = db.fetchone(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto END), 0) AS ingresos_mes,
+                    COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto END), 0) AS gastos_mes,
+                    COUNT(*) AS movimientos_mes
+                FROM movimientos
+                WHERE substring(fecha::text, 1, 7) = ? AND condominio_id = ?
+                """,
+                (current_month, condominio_id),
+            )
+        resumen_ingresos = db.fetchone('SELECT COALESCE(SUM(monto), 0) AS total FROM movimientos WHERE tipo = ? AND condominio_id = ?', ('ingreso', condominio_id))
+        resumen_gastos = db.fetchone('SELECT COALESCE(SUM(monto), 0) AS total FROM movimientos WHERE tipo = ? AND condominio_id = ?', ('gasto', condominio_id))
+        parcelas_activas = db.fetchone('SELECT COUNT(*) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?', (condominio_id,))
+        condominio = db.fetchone('SELECT id, nombre, activo FROM condominios WHERE id = ?', (condominio_id,))
+        return api_response({
+            'ok': True,
+            'condominio': dict(condominio) if condominio else None,
+            'summary': {
+                'ingresos_total': float((resumen_ingresos['total'] if resumen_ingresos else 0) or 0),
+                'gastos_total': float((resumen_gastos['total'] if resumen_gastos else 0) or 0),
+                'saldo_total': float(((resumen_ingresos['total'] if resumen_ingresos else 0) or 0) - ((resumen_gastos['total'] if resumen_gastos else 0) or 0)),
+                'ingresos_mes': float((resumen_mes['ingresos_mes'] if resumen_mes else 0) or 0),
+                'gastos_mes': float((resumen_mes['gastos_mes'] if resumen_mes else 0) or 0),
+                'movimientos_mes': int((resumen_mes['movimientos_mes'] if resumen_mes else 0) or 0),
+                'parcelas_activas': int((parcelas_activas['total'] if parcelas_activas else 0) or 0),
+            },
+        })
+
+    @app.get('/api/parcelas')
+    @api_login_required
+    def api_parcelas():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        q = request.args.get('q', '').strip()
+        params: list[Any] = [condominio_id]
+        sql = 'SELECT id, nombre, curso, cuota_mensual, apoderado, telefono, direccion, observacion_ficha, activo, condominio_id FROM parcelas WHERE condominio_id = ?'
+        if api_user_should_be_limited_to_own_parcela(user):
+            sql += ' AND id = ?'
+            params.append(int(user.parcela_id))
+        if q:
+            sql += ' AND (lower(nombre) LIKE ? OR lower(COALESCE(curso, "")) LIKE ?)'
+            params.extend([f'%{q.lower()}%', f'%{q.lower()}%'])
+        sql += ' ORDER BY nombre'
+        rows = db.fetchall(sql, params)
+        return api_response({'ok': True, 'items': [dict(r) for r in rows], 'count': len(rows)})
+
+    @app.get('/api/movimientos')
+    @api_login_required
+    def api_movimientos():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        try:
+            limit = int(request.args.get('limit', '50') or 50)
+        except Exception:
+            limit = 50
+        limit = min(max(limit, 1), 200)
+        tipo = request.args.get('tipo', 'Todos').strip()
+        q = request.args.get('q', '').strip()
+        fecha_desde = request.args.get('fecha_desde', '').strip()
+        fecha_hasta = request.args.get('fecha_hasta', '').strip()
+        params: list[Any] = [condominio_id]
+        sql = """
+            SELECT m.id, m.fecha, m.tipo, m.concepto, m.monto, m.observacion, m.origen,
+                   COALESCE(a.nombre, '-') AS actividad,
+                   COALESCE(p.nombre, '-') AS parcela
+            FROM movimientos m
+            LEFT JOIN actividades a ON a.id = m.actividad_id
+            LEFT JOIN parcelas p ON p.id = m.parcela_id
+            WHERE m.condominio_id = ?
+        """
+        if api_user_should_be_limited_to_own_parcela(user):
+            sql += ' AND m.parcela_id = ?'
+            params.append(int(user.parcela_id))
+        if tipo and tipo != 'Todos':
+            sql += ' AND m.tipo = ?'
+            params.append(tipo)
+        if q:
+            sql += ' AND (lower(m.concepto) LIKE ? OR lower(COALESCE(m.observacion, "")) LIKE ?)'
+            params.extend([f'%{q.lower()}%', f'%{q.lower()}%'])
+        if fecha_desde:
+            sql += ' AND m.fecha >= ?'
+            params.append(fecha_desde)
+        if fecha_hasta:
+            sql += ' AND m.fecha <= ?'
+            params.append(fecha_hasta)
+        sql += ' ORDER BY m.fecha DESC, m.id DESC LIMIT ?'
+        params.append(limit)
+        rows = db.fetchall(sql, params)
+        items = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item['monto'] = float(item.get('monto') or 0)
+            except Exception:
+                pass
+            items.append(item)
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
+
+
+
+    @app.post('/api/movimientos')
+    @api_login_required
+    def api_create_movimiento():
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_finance', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear movimientos.'}, 403)
+
+        condominio_id = api_get_condominio_id(db, user)
+        payload = request.get_json(silent=True) or {}
+
+        tipo = str(payload.get('tipo', '')).strip().lower()
+        concepto = str(payload.get('concepto', '') or payload.get('descripcion', '')).strip()
+        observacion = str(payload.get('observacion', '') or '').strip()
+        fecha = str(payload.get('fecha', '') or '').strip()
+        origen = str(payload.get('origen', 'general') or 'general').strip().lower()
+
+        if tipo not in ('ingreso', 'gasto'):
+            return api_response({'ok': False, 'error': 'invalid_tipo', 'message': 'El tipo debe ser ingreso o gasto.'}, 400)
+        if not concepto:
+            return api_response({'ok': False, 'error': 'missing_concepto', 'message': 'Debes indicar un concepto o descripción.'}, 400)
+        if not fecha:
+            fecha = datetime.now().strftime('%Y-%m-%d')
+        try:
+            validar_fecha(fecha)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_fecha', 'message': 'La fecha es inválida. Usa formato YYYY-MM-DD.'}, 400)
+
+        try:
+            monto = float(payload.get('monto', 0) or 0)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_monto', 'message': 'El monto debe ser numérico.'}, 400)
+        if monto <= 0:
+            return api_response({'ok': False, 'error': 'invalid_monto', 'message': 'El monto debe ser mayor a 0.'}, 400)
+
+        actividad_id = payload.get('actividad_id')
+        parcela_id = payload.get('parcela_id')
+        actividad_id = int(actividad_id) if str(actividad_id or '').isdigit() else None
+        parcela_id = int(parcela_id) if str(parcela_id or '').isdigit() else None
+
+        if api_user_should_be_limited_to_own_parcela(user):
+            parcela_id = int(user.parcela_id)
+
+        if parcela_id is not None:
+            parcela = db.fetchone('SELECT id, nombre FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id))
+            if not parcela:
+                return api_response({'ok': False, 'error': 'invalid_parcela', 'message': 'La parcela indicada no existe en este condominio.'}, 400)
+        else:
+            parcela = None
+
+        if actividad_id is not None:
+            actividad = db.fetchone('SELECT id, nombre FROM actividades WHERE id = ? AND condominio_id = ?', (actividad_id, condominio_id))
+            if not actividad:
+                return api_response({'ok': False, 'error': 'invalid_actividad', 'message': 'La actividad indicada no existe en este condominio.'}, 400)
+        else:
+            actividad = None
+
+        cur = db.execute(
+            'INSERT INTO movimientos (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, origen, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, origen or 'general', condominio_id),
+        )
+        movimiento_id = getattr(cur, 'lastrowid', None)
+        if movimiento_id is None and db.kind == 'postgres':
+            row = db.fetchone("SELECT currval(pg_get_serial_sequence('movimientos', 'id')) AS id")
+            movimiento_id = row['id'] if row else None
+        db.commit()
+
+        return api_response({
+            'ok': True,
+            'id': int(movimiento_id) if movimiento_id is not None else None,
+            'item': {
+                'id': int(movimiento_id) if movimiento_id is not None else None,
+                'fecha': fecha,
+                'tipo': tipo,
+                'concepto': concepto,
+                'monto': float(monto),
+                'observacion': observacion,
+                'origen': origen or 'general',
+                'actividad': actividad['nombre'] if actividad else '-',
+                'parcela': parcela['nombre'] if parcela else '-',
+            }
+        }, 201)
+
+    @app.get('/api/votaciones')
+    @api_login_required
+    def api_votaciones():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        estado = request.args.get('estado', '').strip().lower()
+        params: list[Any] = [condominio_id]
+        sql = (
+            "SELECT v.id, v.acta_id, v.titulo, v.descripcion, v.estado, v.created_at, v.closed_at, "
+            "a.titulo AS acta_titulo, a.fecha AS acta_fecha, COUNT(DISTINCT vv.id) AS total_votos "
+            "FROM votaciones v "
+            "LEFT JOIN actas a ON a.id = v.acta_id "
+            "LEFT JOIN votacion_votos vv ON vv.votacion_id = v.id "
+            "WHERE v.condominio_id = ?"
+        )
+        if estado in ('abierta', 'cerrada', 'aprobada', 'rechazada'):
+            sql += ' AND v.estado = ?'
+            params.append(estado)
+        sql += (
+            ' GROUP BY v.id, v.acta_id, v.titulo, v.descripcion, v.estado, v.created_at, v.closed_at, a.titulo, a.fecha'
+            " ORDER BY CASE WHEN v.estado = 'abierta' THEN 0 ELSE 1 END, COALESCE(v.created_at, a.fecha) DESC, v.id DESC"
+        )
+        rows = db.fetchall(sql, params)
+        items = []
+        for row in rows:
+            item = dict(row)
+            item['can_vote'] = bool(getattr(user, 'parcela_id', None)) and item.get('estado') == 'abierta'
+            item['can_manage'] = api_can_manage_votaciones(user)
+            item['total_votos'] = int(item.get('total_votos') or 0)
+            items.append(item)
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
+
+    @app.get('/api/votaciones/<int:votacion_id>')
+    @api_login_required
+    def api_votacion_detail(votacion_id: int):
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        votacion = db.fetchone(
+            "SELECT v.id, v.acta_id, v.titulo, v.descripcion, v.estado, v.created_at, v.closed_at, "
+            "a.titulo AS acta_titulo, a.fecha AS acta_fecha "
+            "FROM votaciones v LEFT JOIN actas a ON a.id = v.acta_id "
+            "WHERE v.id = ? AND v.condominio_id = ?",
+            (votacion_id, condominio_id),
+        )
+        if not votacion:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
+        opciones_rows = db.fetchall(
+            "SELECT o.id, o.texto, o.orden, COUNT(v.id) AS votos "
+            "FROM votacion_opciones o "
+            "LEFT JOIN votacion_votos v ON v.opcion_id = o.id "
+            "WHERE o.votacion_id = ? AND o.condominio_id = ? "
+            "GROUP BY o.id, o.texto, o.orden ORDER BY o.orden, o.id",
+            (votacion_id, condominio_id),
+        )
+        user_id = int(user.id.split(':')[-1]) if ':' in user.id else int(user.id)
+        voto_usuario = db.fetchone(
+            "SELECT vv.id, vv.opcion_id, vv.created_at, vo.texto AS opcion_texto "
+            "FROM votacion_votos vv "
+            "INNER JOIN votacion_opciones vo ON vo.id = vv.opcion_id "
+            "WHERE vv.votacion_id = ? AND vv.user_id = ? LIMIT 1",
+            (votacion_id, user_id),
+        )
+        raw_opciones = []
+        total_votos = 0
+        for row in opciones_rows:
+            votos = int(row['votos'] or 0)
+            total_votos += votos
+            raw_opciones.append((row, votos))
+        opciones = []
+        for row, votos in raw_opciones:
+            opciones.append({
+                'id': int(row['id']),
+                'texto': row['texto'],
+                'orden': int(row['orden'] or 0),
+                'votos': votos,
+                'porcentaje': round((votos * 100.0 / total_votos), 1) if total_votos > 0 else 0.0,
+            })
+        puede_votar = bool(getattr(user, 'parcela_id', None)) and votacion['estado'] == 'abierta' and voto_usuario is None
+        return api_response({'ok': True, 'item': {
+            'id': int(votacion['id']),
+            'acta_id': votacion['acta_id'],
+            'acta_titulo': votacion['acta_titulo'],
+            'acta_fecha': votacion['acta_fecha'],
+            'titulo': votacion['titulo'],
+            'descripcion': votacion['descripcion'],
+            'estado': votacion['estado'],
+            'created_at': votacion['created_at'],
+            'closed_at': votacion['closed_at'],
+            'total_votos': total_votos,
+            'puede_votar': puede_votar,
+            'ya_voto': voto_usuario is not None,
+            'voto_usuario': dict(voto_usuario) if voto_usuario else None,
+            'can_manage': api_can_manage_votaciones(user),
+            'opciones': opciones,
+        }})
+
+    @app.post('/api/votaciones/<int:votacion_id>/votar')
+    @api_login_required
+    def api_votacion_vote(votacion_id: int):
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        if not getattr(user, 'parcela_id', None):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'Tu usuario no tiene una parcela asignada para votar.'}, 403)
+        votacion = db.fetchone('SELECT id, estado FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+        if not votacion:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
+        if votacion['estado'] != 'abierta':
+            return api_response({'ok': False, 'error': 'closed', 'message': 'La votación ya está cerrada.'}, 400)
+        user_id = int(user.id.split(':')[-1]) if ':' in user.id else int(user.id)
+        if db.fetchone('SELECT 1 FROM votacion_votos WHERE votacion_id = ? AND user_id = ?', (votacion_id, user_id)):
+            return api_response({'ok': False, 'error': 'already_voted', 'message': 'Ya registraste tu voto en esta votación.'}, 400)
+        payload = request.get_json(silent=True) or {}
+        opcion_id_raw = payload.get('opcion_id')
+        try:
+            opcion_id = int(opcion_id_raw)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_option', 'message': 'Debes seleccionar una opción válida.'}, 400)
+        opcion = db.fetchone('SELECT id, texto FROM votacion_opciones WHERE id = ? AND votacion_id = ? AND condominio_id = ?', (opcion_id, votacion_id, condominio_id))
+        if not opcion:
+            return api_response({'ok': False, 'error': 'invalid_option', 'message': 'La opción seleccionada no pertenece a esta votación.'}, 400)
+        db.execute(
+            'INSERT INTO votacion_votos (votacion_id, opcion_id, user_id, parcela_id, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?)',
+            (votacion_id, opcion_id, user_id, int(user.parcela_id), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+        )
+        db.commit()
+        return api_response({'ok': True, 'message': 'Voto registrado correctamente.', 'opcion_id': opcion_id, 'opcion_texto': opcion['texto']})
+
+    def serialize_acta_row(row: Any, can_manage: bool = False) -> dict[str, Any]:
+        item = dict(row)
+        # Normalizar campos esperados por Flutter. Algunas actas antiguas pueden traer NULL.
+        for key in ('titulo', 'fecha', 'estado', 'lugar', 'hora_inicio', 'hora_termino', 'asistentes', 'temas', 'desarrollo', 'acuerdos', 'responsables', 'observaciones', 'created_by', 'updated_at'):
+            if item.get(key) is None:
+                item[key] = ''
+        item['can_manage'] = can_manage
+        return item
+
+    @app.get('/api/actas')
+    @api_login_required
+    def api_actas():
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        can_manage = bool(getattr(user, 'can_manage_actas', lambda: False)())
+        rows = db.fetchall(
+            """
+            SELECT id, titulo, fecha, lugar, hora_inicio, hora_termino,
+                   asistentes, temas, desarrollo, acuerdos, responsables,
+                   observaciones, estado, created_by, updated_at, condominio_id
+            FROM actas
+            WHERE condominio_id = ?
+            ORDER BY fecha DESC, id DESC
+            LIMIT 100
+            """,
+            (condominio_id,),
+        )
+        items = [serialize_acta_row(r, can_manage) for r in rows]
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
+
+    @app.post('/api/votaciones')
+    @api_login_required
+    def api_votacion_create():
+        db = g.api_db
+        user = g.api_user
+        if not api_can_manage_votaciones(user):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear votaciones.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        payload = request.get_json(silent=True) or {}
+        try:
+            acta_id = int(payload.get('acta_id'))
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_acta', 'message': 'Debes seleccionar un acta válida.'}, 400)
+        titulo = str(payload.get('titulo', '')).strip()
+        descripcion = str(payload.get('descripcion', '')).strip()
+        opciones = payload.get('opciones') or []
+        if not isinstance(opciones, list):
+            opciones = []
+        opciones_texto = [str(item).strip() for item in opciones if str(item).strip()]
+        if not titulo:
+            return api_response({'ok': False, 'error': 'missing_title', 'message': 'Debes indicar el título de la votación.'}, 400)
+        if len(opciones_texto) < 2:
+            return api_response({'ok': False, 'error': 'missing_options', 'message': 'Debes ingresar al menos dos opciones.'}, 400)
+        acta = db.fetchone('SELECT id, titulo, fecha FROM actas WHERE id = ? AND condominio_id = ?', (acta_id, condominio_id))
+        if not acta:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Acta no encontrada.'}, 404)
+        try:
+            if db.kind == 'postgres':
+                cur = db.execute(
+                    'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
+                    (acta_id, titulo, descripcion, 'abierta', user.nombre or user.username, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+                )
+                row = cur.fetchone()
+                votacion_id = row['id'] if row else None
+            else:
+                cur = db.execute(
+                    'INSERT INTO votaciones (acta_id, titulo, descripcion, estado, created_by, created_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (acta_id, titulo, descripcion, 'abierta', user.nombre or user.username, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id),
+                )
+                votacion_id = cur.lastrowid
+            if not votacion_id:
+                raise ValueError('No se pudo obtener el id de la votación creada.')
+            for idx, opcion in enumerate(opciones_texto, start=1):
+                db.execute(
+                    'INSERT INTO votacion_opciones (votacion_id, texto, orden, condominio_id) VALUES (?, ?, ?, ?)',
+                    (votacion_id, opcion, idx, condominio_id),
+                )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            app.logger.exception('Error creando votación API')
+            return api_response({'ok': False, 'error': 'create_failed', 'message': str(exc)}, 500)
+        return api_response({'ok': True, 'id': int(votacion_id), 'message': 'Votación creada correctamente.'}, 201)
+
+    @app.post('/api/votaciones/<int:votacion_id>/cerrar')
+    @api_login_required
+    def api_votacion_close(votacion_id: int):
+        db = g.api_db
+        user = g.api_user
+        if not api_can_manage_votaciones(user):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para cerrar votaciones.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        votacion = db.fetchone('SELECT id, estado FROM votaciones WHERE id = ? AND condominio_id = ?', (votacion_id, condominio_id))
+        if not votacion:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Votación no encontrada.'}, 404)
+        if votacion['estado'] != 'abierta':
+            return api_response({'ok': False, 'error': 'already_closed', 'message': 'La votación ya está cerrada.'}, 400)
+        _, _, estado_resuelto = calcular_resumen_votacion(db, votacion_id, condominio_id)
+        closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Mantener la misma actualización que usa la web.
+        # Importante: no usar updated_at aquí, porque algunas bases de Render no tienen esa columna
+        # y en PostgreSQL un error deja la transacción abortada.
+        db.execute(
+            'UPDATE votaciones SET estado = ?, closed_at = ? WHERE id = ? AND condominio_id = ?',
+            (estado_resuelto, closed_at, votacion_id, condominio_id),
+        )
+        db.commit()
+        return api_response({
+            'ok': True,
+            'id': int(votacion_id),
+            'estado': estado_resuelto,
+            'message': 'Votación cerrada correctamente.',
+            'item': {
+                'id': int(votacion_id),
+                'estado': estado_resuelto,
+                'closed_at': closed_at,
+                'cerrada': True,
+            },
+        })
+
+    @app.get('/api/roles')
+    @api_login_required
+    def api_roles():
+        """Catálogo único de roles para alinear web y app móvil."""
+        return api_response({
+            'ok': True,
+            'items': [
+                {'id': role, 'label': ROLE_LABELS.get(role, role.replace('_', ' ').title())}
+                for role in ALLOWED_ROLES
+            ],
+        })
+
+    @app.get('/api/usuarios')
+    @api_login_required
+    def api_usuarios():
+        """Listado de usuarios del condominio, equivalente a la sección web Usuarios."""
+        db = g.api_db
+        user = g.api_user
+        role = (getattr(user, 'role', '') or '').lower()
+        if role not in ('admin', 'presidente', 'secretario'):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para ver usuarios.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        params: list[Any] = []
+        sql = """
+            SELECT u.id, u.username, u.nombre, u.role, u.activo, u.must_change_password,
+                   u.condominio_id, u.parcela_id,
+                   c.nombre AS condominio_nombre,
+                   p.nombre AS parcela_nombre
+            FROM usuarios u
+            LEFT JOIN condominios c ON c.id = u.condominio_id
+            LEFT JOIN parcelas p ON p.id = u.parcela_id
+            WHERE 1=1
+        """
+        if not getattr(user, 'is_global_admin', lambda: False)():
+            sql += ' AND u.condominio_id = ?'
+            params.append(condominio_id)
+        elif condominio_id:
+            sql += ' AND u.condominio_id = ?'
+            params.append(condominio_id)
+        q = request.args.get('q', '').strip().lower()
+        if q:
+            like = f'%{q}%'
+            sql += " AND (lower(coalesce(u.nombre, '')) LIKE ? OR lower(coalesce(u.username, '')) LIKE ? OR lower(coalesce(u.role, '')) LIKE ?)"
+            params.extend([like, like, like])
+        sql += " ORDER BY coalesce(c.nombre, ''), u.nombre, u.username LIMIT 300"
+        rows = db.fetchall(sql, params)
+        return api_response({'ok': True, 'items': [dict(r) for r in rows], 'count': len(rows)})
+
+    @app.get('/api/actas/<int:acta_id>')
+    @api_login_required
+    def api_acta_detail(acta_id: int):
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        row = db.fetchone(
+            """
+            SELECT id, titulo, fecha, lugar, hora_inicio, hora_termino,
+                   asistentes, temas, desarrollo, acuerdos, responsables,
+                   observaciones, estado, created_by, updated_at, condominio_id
+            FROM actas
+            WHERE id = ? AND condominio_id = ?
+            """,
+            (acta_id, condominio_id),
+        )
+        if not row:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Acta/minuta no encontrada.'}, 404)
+        can_manage = bool(getattr(user, 'can_manage_actas', lambda: False)())
+        return api_response({'ok': True, 'item': serialize_acta_row(row, can_manage)})
+
+    @app.post('/api/actas')
+    @api_login_required
+    def api_create_acta():
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_actas', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para crear actas/minutas.'}, 403)
+        payload = request.get_json(silent=True) or {}
+        condominio_id = api_get_condominio_id(db, user)
+        titulo = str(payload.get('titulo') or 'Acta Asamblea de Condominio').strip()
+        fecha = str(payload.get('fecha') or datetime.today().strftime('%Y-%m-%d')).strip()
+        try:
+            validar_fecha(fecha)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_fecha', 'message': 'Fecha inválida. Usa YYYY-MM-DD.'}, 400)
+        estado = str(payload.get('estado') or 'borrador').strip()
+        if estado not in ACTA_ESTADOS:
+            estado = 'borrador'
+        values = (
+            titulo, fecha, str(payload.get('lugar') or '').strip(), str(payload.get('hora_inicio') or '').strip(),
+            str(payload.get('hora_termino') or '').strip(), str(payload.get('asistentes') or '').strip(),
+            str(payload.get('temas') or '').strip(), str(payload.get('desarrollo') or '').strip(),
+            str(payload.get('acuerdos') or '').strip(), str(payload.get('responsables') or '').strip(),
+            str(payload.get('observaciones') or '').strip(), estado, user.nombre or user.username,
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), condominio_id,
+        )
+        if db.kind == 'postgres':
+            cur = db.execute("""INSERT INTO actas (titulo, fecha, lugar, hora_inicio, hora_termino, asistentes, temas, desarrollo, acuerdos, responsables, observaciones, estado, created_by, updated_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""", values)
+            row = cur.fetchone()
+            acta_id = row['id'] if row else None
+        else:
+            cur = db.execute("""INSERT INTO actas (titulo, fecha, lugar, hora_inicio, hora_termino, asistentes, temas, desarrollo, acuerdos, responsables, observaciones, estado, created_by, updated_at, condominio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values)
+            acta_id = getattr(cur, 'lastrowid', None)
+        db.commit()
+        try:
+            if estado == 'aprobada':
+                title = 'Nueva acta disponible'
+                body = titulo
+                tokens = get_active_push_tokens(db, condominio_id)
+                send_fcm_to_tokens(app, tokens, title, body, {'type': 'acta', 'acta_id': acta_id or '', 'screen': 'actas'})
+                record_push_notification(db, condominio_id, title, body, 'acta', user.nombre or user.username)
+                db.commit()
+        except Exception:
+            db.rollback()
+            app.logger.exception('No se pudo enviar push de acta')
+        return api_response({'ok': True, 'id': int(acta_id) if acta_id else None, 'message': 'Acta/minuta creada correctamente.'}, 201)
+
+    @app.get('/api/pagos')
+    @api_login_required
+    def api_pagos():
+        """Pagos de gastos comunes, alineado con la vista web Pagos."""
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        params: list[Any] = [condominio_id]
+        sql = """
+            SELECT p.id, p.parcela_id, a.nombre AS parcela_nombre, a.curso,
+                   p.fecha, p.mes, p.monto, p.observacion, p.movimiento_id
+            FROM pagos_parcelas p
+            INNER JOIN parcelas a ON a.id = p.parcela_id AND a.condominio_id = p.condominio_id
+            WHERE p.condominio_id = ?
+        """
+        if api_user_should_be_limited_to_own_parcela(user):
+            sql += ' AND p.parcela_id = ?'
+            params.append(int(user.parcela_id))
+        mes = request.args.get('mes', '').strip()
+        if mes:
+            sql += ' AND p.mes = ?'
+            params.append(mes)
+        try:
+            limit = min(max(int(request.args.get('limit', '100') or 100), 1), 300)
+        except Exception:
+            limit = 100
+        sql += ' ORDER BY p.fecha DESC, p.id DESC LIMIT ?'
+        params.append(limit)
+        rows = db.fetchall(sql, params)
+        items = []
+        total = 0.0
+        for r in rows:
+            item = dict(r)
+            item['monto'] = float(item.get('monto') or 0)
+            total += item['monto']
+            items.append(item)
+        return api_response({'ok': True, 'items': items, 'count': len(items), 'summary': {'total': total, 'count': len(items)}})
+
+    @app.post('/api/pagos')
+    @api_login_required
+    def api_create_pago():
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_finance', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para registrar pagos.'}, 403)
+        payload = request.get_json(silent=True) or {}
+        condominio_id = api_get_condominio_id(db, user)
+        try:
+            parcela_id = int(payload.get('parcela_id') or 0)
+            fecha = str(payload.get('fecha') or datetime.today().strftime('%Y-%m-%d')).strip()
+            mes = str(payload.get('mes') or fecha[:7]).strip()
+            monto = parse_float(str(payload.get('monto') or '0'))
+            observacion = str(payload.get('observacion') or '').strip()
+            validar_fecha(fecha)
+            datetime.strptime(mes + '-01', '%Y-%m-%d')
+            if monto <= 0:
+                raise ValueError('Monto inválido')
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_pago', 'message': 'Datos de pago inválidos.'}, 400)
+        if not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
+            return api_response({'ok': False, 'error': 'invalid_parcela', 'message': 'Parcela inválida.'}, 400)
+        if db.fetchone('SELECT 1 FROM pagos_parcelas WHERE parcela_id = ? AND mes = ? AND condominio_id = ?', (parcela_id, mes, condominio_id)):
+            return api_response({'ok': False, 'error': 'duplicate_pago', 'message': 'Esa parcela ya tiene un pago registrado para ese mes.'}, 409)
+        registrar_pago_parcela(db, parcela_id, fecha, mes, monto, observacion, None, 'cuota_mensual')
+        db.commit()
+        try:
+            row_user = db.fetchone('SELECT id FROM usuarios WHERE parcela_id = ? AND condominio_id = ? AND activo = 1 LIMIT 1', (parcela_id, condominio_id))
+            title = 'Pago registrado'
+            body = f'Tu pago de gastos comunes para {mes} fue registrado correctamente.'
+            tokens = get_active_push_tokens(db, condominio_id, user_id=int(row_user['id']) if row_user else None)
+            send_fcm_to_tokens(app, tokens, title, body, {'type': 'pago', 'mes': mes, 'screen': 'finanzas'})
+            record_push_notification(db, condominio_id, title, body, 'pago', user.nombre or user.username, None)
+            db.commit()
+        except Exception:
+            db.rollback()
+            app.logger.exception('No se pudo enviar push de pago')
+        return api_response({'ok': True, 'message': 'Pago registrado correctamente.'}, 201)
+
+
+
+    @app.get('/api/estado-cuenta')
+    @api_login_required
+    def api_estado_cuenta():
+        """Estado de cuenta móvil: pagos, cuota esperada y deuda estimada del mes."""
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        current_month = datetime.now().strftime('%Y-%m')
+        cuota_params_scope: list[Any] = [condominio_id]
+        pago_params_scope: list[Any] = [condominio_id]
+        cuota_filter = ''
+        pago_filter = ''
+        if api_user_should_be_limited_to_own_parcela(user):
+            cuota_filter = ' AND id = ?'
+            pago_filter = ' AND parcela_id = ?'
+            cuota_params_scope.append(int(user.parcela_id))
+            pago_params_scope.append(int(user.parcela_id))
+
+        cuota_row = db.fetchone(
+            'SELECT COALESCE(SUM(cuota_mensual), 0) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?' + cuota_filter,
+            cuota_params_scope,
+        )
+        pagos_mes_row = db.fetchone(
+            'SELECT COALESCE(SUM(monto), 0) AS total, COUNT(*) AS count FROM pagos_parcelas WHERE condominio_id = ? AND mes = ?' + pago_filter,
+            [condominio_id, current_month] + ([int(user.parcela_id)] if api_user_should_be_limited_to_own_parcela(user) else []),
+        )
+        pagos_total_row = db.fetchone(
+            'SELECT COALESCE(SUM(monto), 0) AS total, COUNT(*) AS count FROM pagos_parcelas WHERE condominio_id = ?' + pago_filter,
+            pago_params_scope,
+        )
+
+        rows = db.fetchall(
+            """
+            SELECT p.id, p.parcela_id, a.nombre AS parcela_nombre, a.curso,
+                   p.fecha, p.mes, p.monto, p.observacion, p.movimiento_id
+            FROM pagos_parcelas p
+            INNER JOIN parcelas a ON a.id = p.parcela_id AND a.condominio_id = p.condominio_id
+            WHERE p.condominio_id = ?
+            """ + (' AND p.parcela_id = ?' if api_user_should_be_limited_to_own_parcela(user) else '') + " ORDER BY p.fecha DESC, p.id DESC LIMIT 20",
+            [condominio_id] + ([int(user.parcela_id)] if api_user_should_be_limited_to_own_parcela(user) else []),
+        )
+        items = []
+        for r in rows:
+            item = dict(r)
+            item['monto'] = float(item.get('monto') or 0)
+            items.append(item)
+        cuota = float((cuota_row['total'] if cuota_row else 0) or 0)
+        pagado_mes = float((pagos_mes_row['total'] if pagos_mes_row else 0) or 0)
+        pagado_total = float((pagos_total_row['total'] if pagos_total_row else 0) or 0)
+        pagos_count = int((pagos_total_row['count'] if pagos_total_row else 0) or 0)
+        return api_response({
+            'ok': True,
+            'items': items,
+            'summary': {
+                'mes': current_month,
+                'total_pagado_mes': pagado_mes,
+                'total_pagado_historico': pagado_total,
+                'cuota_mensual_esperada': cuota,
+                'deuda_estimada': max(cuota - pagado_mes, 0),
+                'pagos_registrados': pagos_count,
+            },
+        })
+
+    @app.post('/api/push/register')
+    @api_login_required
+    def api_push_register():
+        """Registra/actualiza el token FCM del dispositivo del usuario autenticado."""
+        db = g.api_db
+        user = g.api_user
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get('token') or '').strip()
+        if not token:
+            return api_response({'ok': False, 'error': 'invalid_token', 'message': 'Token FCM inválido.'}, 400)
+        platform = str(payload.get('platform') or push_platform_from_user_agent()).strip()[:40]
+        device_name = str(payload.get('device_name') or '').strip()[:120]
+        condominio_id = api_get_condominio_id(db, user)
+        if condominio_id is None:
+            return api_response({'ok': False, 'error': 'no_condominio', 'message': 'Usuario sin condominio activo.'}, 403)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        existing = db.fetchone('SELECT id FROM push_tokens WHERE token = ?', (token,)) if table_exists(db, 'push_tokens') else None
+        try:
+            if existing:
+                db.execute('UPDATE push_tokens SET user_id = ?, condominio_id = ?, platform = ?, device_name = ?, activo = 1, updated_at = ?, last_seen_at = ? WHERE token = ?', (int(user.id), condominio_id, platform, device_name, now, now, token))
+            else:
+                db.execute('INSERT INTO push_tokens (user_id, condominio_id, token, platform, device_name, activo, created_at, updated_at, last_seen_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)', (int(user.id), condominio_id, token, platform, device_name, now, now, now))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            app.logger.exception('Error registrando token push')
+            return api_response({'ok': False, 'error': 'push_register_failed', 'message': str(exc)}, 500)
+        return api_response({'ok': True, 'message': 'Dispositivo registrado para notificaciones push.', 'push_enabled': firebase_push_enabled()})
+
+    @app.post('/api/push/unregister')
+    @api_login_required
+    def api_push_unregister():
+        db = g.api_db
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get('token') or '').strip()
+        if token:
+            db.execute('UPDATE push_tokens SET activo = 0, updated_at = ? WHERE token = ? AND user_id = ?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), token, int(g.api_user.id)))
+        else:
+            db.execute('UPDATE push_tokens SET activo = 0, updated_at = ? WHERE user_id = ?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), int(g.api_user.id)))
+        db.commit()
+        return api_response({'ok': True, 'message': 'Dispositivo desregistrado.'})
+
+    def _api_can_send_business_notifications(user: User) -> bool:
+        role = (getattr(user, 'role', '') or '').lower()
+        return role in ('admin', 'presidente', 'tesorero', 'secretario', 'comite')
+
+    def _resolve_notification_target(db: DBAdapter, condominio_id: int | None, payload: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+        """Resuelve destinatarios de negocio sin exponer tokens a la app."""
+        destino = str(payload.get('destino') or payload.get('target') or 'todos').strip().lower()
+        role = str(payload.get('role') or payload.get('target_role') or '').strip() or None
+        user_id_raw = payload.get('user_id') or payload.get('usuario_id')
+        parcela_id_raw = payload.get('parcela_id')
+        mes = str(payload.get('mes') or datetime.now().strftime('%Y-%m')).strip()[:7]
+
+        meta: dict[str, Any] = {'destino': destino, 'role': role, 'mes': mes}
+        if destino in ('todos', 'all'):
+            return get_active_push_tokens(db, condominio_id), meta
+        if destino in ('rol', 'role'):
+            if not role or role not in ALLOWED_ROLES:
+                raise ValueError('Rol destino inválido.')
+            meta['target_role'] = role
+            return get_active_push_tokens(db, condominio_id, role=role), meta
+        if destino in ('usuario', 'user'):
+            user_id = int(user_id_raw or 0)
+            if user_id <= 0:
+                raise ValueError('Usuario destino inválido.')
+            if not db.fetchone('SELECT 1 FROM usuarios WHERE id = ? AND condominio_id = ? AND activo = 1', (user_id, condominio_id)):
+                raise ValueError('El usuario destino no pertenece al condominio activo.')
+            meta['target_user_id'] = user_id
+            return get_active_push_tokens(db, condominio_id, user_id=user_id), meta
+        if destino in ('parcela', 'unidad', 'vivienda'):
+            parcela_id = int(parcela_id_raw or 0)
+            if parcela_id <= 0:
+                raise ValueError('Parcela destino inválida.')
+            if not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ? AND activo = 1', (parcela_id, condominio_id)):
+                raise ValueError('La parcela destino no pertenece al condominio activo.')
+            meta['target_parcela_id'] = parcela_id
+            return get_active_push_tokens(db, condominio_id, parcela_id=parcela_id), meta
+        if destino in ('morosos', 'deudores', 'pagos_vencidos'):
+            parcela_ids = get_moroso_parcela_ids(db, condominio_id, mes=mes)
+            meta['target_group'] = 'morosos'
+            meta['parcela_count'] = len(parcela_ids)
+            return get_push_tokens_for_parcelas(db, condominio_id, parcela_ids), meta
+        raise ValueError('Destino inválido. Usa todos, rol, usuario, parcela o morosos.')
+
+    @app.post('/api/notificaciones/enviar')
+    @api_login_required
+    def api_push_send_notice():
+        """Envía avisos de negocio desde un usuario autorizado. No es endpoint de pruebas."""
+        db = g.api_db
+        user = g.api_user
+        if not _api_can_send_business_notifications(user):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para enviar avisos.'}, 403)
+        payload = request.get_json(silent=True) or {}
+        title = str(payload.get('title') or payload.get('titulo') or '').strip()[:90]
+        body = str(payload.get('body') or payload.get('mensaje') or '').strip()[:500]
+        tipo = str(payload.get('tipo') or 'aviso').strip()[:40] or 'aviso'
+        if not title or not body:
+            return api_response({'ok': False, 'error': 'invalid_notice', 'message': 'Debes indicar título y mensaje.'}, 400)
+        condominio_id = api_get_condominio_id(db, user)
+        try:
+            tokens, target_meta = _resolve_notification_target(db, condominio_id, payload)
+        except Exception as exc:
+            return api_response({'ok': False, 'error': 'invalid_target', 'message': str(exc)}, 400)
+        result = send_fcm_to_tokens(app, tokens, title, body, {'type': tipo, 'screen': str(payload.get('screen') or 'notificaciones')})
+        record_push_notification(
+            db, condominio_id, title, body, tipo, user.nombre or user.username,
+            target_role=target_meta.get('target_role'),
+            target_user_id=target_meta.get('target_user_id'),
+            target_parcela_id=target_meta.get('target_parcela_id'),
+            target_group=target_meta.get('target_group'),
+        )
+        db.commit()
+        return api_response({'ok': True, 'message': 'Aviso enviado.', 'destino': target_meta, 'push': result})
+
+    @app.post('/api/admin/notificaciones/enviar')
+    @api_login_required
+    def api_admin_push_send_notice():
+        """Alias administrativo para automatizaciones y panel web/admin."""
+        return api_push_send_notice()
+
+    @app.post('/api/admin/notificaciones/morosos')
+    @api_login_required
+    def api_admin_push_morosos():
+        """Automatización de negocio: aviso a usuarios con gasto común pendiente del mes."""
+        db = g.api_db
+        user = g.api_user
+        if not _api_can_send_business_notifications(user):
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para enviar avisos.'}, 403)
+        payload = request.get_json(silent=True) or {}
+        mes = str(payload.get('mes') or datetime.now().strftime('%Y-%m')).strip()[:7]
+        titulo = str(payload.get('titulo') or 'Gasto común pendiente').strip()[:90]
+        mensaje = str(payload.get('mensaje') or f'Tienes un gasto común pendiente correspondiente a {mes}.').strip()[:500]
+        condominio_id = api_get_condominio_id(db, user)
+        parcela_ids = get_moroso_parcela_ids(db, condominio_id, mes=mes)
+        tokens = get_push_tokens_for_parcelas(db, condominio_id, parcela_ids)
+        result = send_fcm_to_tokens(app, tokens, titulo, mensaje, {'type': 'pago_vencido', 'screen': 'finanzas', 'mes': mes})
+        record_push_notification(db, condominio_id, titulo, mensaje, 'pago_vencido', user.nombre or user.username, target_group='morosos')
+        db.commit()
+        return api_response({'ok': True, 'message': 'Aviso a morosos procesado.', 'mes': mes, 'parcelas_morosas': len(parcela_ids), 'push': result})
+
+    @app.route('/notificaciones/enviar', methods=['GET', 'POST'])
+    @login_required
+    def notificaciones_enviar():
+        """Panel web de negocio para enviar avisos push sin exponer tokens ni usar herramientas técnicas."""
+        db = get_db()
+        if not _api_can_send_business_notifications(current_user):
+            flash('No tienes permisos para enviar avisos.', 'danger')
+            return redirect(url_for('dashboard'))
+
+        condominio_id = get_current_condominio_id(db)
+        roles = [(r, ROLE_LABELS.get(r, r.title())) for r in ALLOWED_ROLES]
+        # Aun para super admin, el panel opera siempre sobre el condominio activo
+        # para evitar envíos globales accidentales entre clientes.
+        if current_user.is_global_admin():
+            usuarios = db.fetchall(
+                """
+                SELECT u.id, u.nombre, u.username, u.role, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM usuarios u
+                LEFT JOIN condominios c ON c.id = u.condominio_id
+                WHERE COALESCE(u.activo, 1) = 1 AND u.condominio_id = ?
+                ORDER BY u.nombre, u.username
+                """,
+                (condominio_id,),
+            )
+            parcelas = db.fetchall(
+                """
+                SELECT p.id, p.nombre, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM parcelas p
+                LEFT JOIN condominios c ON c.id = p.condominio_id
+                WHERE COALESCE(p.activo, 1) = 1 AND p.condominio_id = ?
+                ORDER BY p.nombre
+                """,
+                (condominio_id,),
+            )
+        else:
+            usuarios = db.fetchall(
+                """
+                SELECT u.id, u.nombre, u.username, u.role, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM usuarios u
+                LEFT JOIN condominios c ON c.id = u.condominio_id
+                WHERE COALESCE(u.activo, 1) = 1 AND u.condominio_id = ?
+                ORDER BY u.nombre, u.username
+                """,
+                (condominio_id,),
+            )
+            parcelas = db.fetchall(
+                """
+                SELECT p.id, p.nombre, COALESCE(c.nombre, '-') AS condominio_nombre
+                FROM parcelas p
+                LEFT JOIN condominios c ON c.id = p.condominio_id
+                WHERE COALESCE(p.activo, 1) = 1 AND p.condominio_id = ?
+                ORDER BY p.nombre
+                """,
+                (condominio_id,),
+            )
+
+        form = {}
+        if request.method == 'POST':
+            payload = {
+                'titulo': request.form.get('titulo', '').strip(),
+                'mensaje': request.form.get('mensaje', '').strip(),
+                'destino': request.form.get('destino', 'todos').strip(),
+                'role': request.form.get('role', '').strip(),
+                'user_id': request.form.get('user_id', '').strip(),
+                'parcela_id': request.form.get('parcela_id', '').strip(),
+                'mes': request.form.get('mes', '').strip(),
+                'tipo': request.form.get('tipo', 'aviso').strip() or 'aviso',
+                'screen': request.form.get('screen', 'notificaciones').strip() or 'notificaciones',
+            }
+            form = payload
+            titulo = str(payload.get('titulo') or '')[:90]
+            mensaje = str(payload.get('mensaje') or '')[:500]
+            if not titulo or not mensaje:
+                flash('Debes indicar título y mensaje.', 'danger')
+            else:
+                try:
+                    tokens, target_meta = _resolve_notification_target(db, condominio_id, payload)
+                    result = send_fcm_to_tokens(app, tokens, titulo, mensaje, {'type': payload['tipo'], 'screen': payload['screen']})
+                    record_push_notification(
+                        db, condominio_id, titulo, mensaje, payload['tipo'], current_user.nombre or current_user.username,
+                        target_role=target_meta.get('target_role'),
+                        target_user_id=target_meta.get('target_user_id'),
+                        target_parcela_id=target_meta.get('target_parcela_id'),
+                        target_group=target_meta.get('target_group'),
+                    )
+                    db.commit()
+                    requested = int(result.get('requested') or 0)
+                    sent = int(result.get('sent') or 0)
+                    failed = int(result.get('failed') or 0)
+                    if not result.get('enabled'):
+                        flash('Aviso guardado, pero Firebase Admin no está configurado para enviar push.', 'warning')
+                    elif requested == 0:
+                        flash('Aviso guardado. No hay dispositivos registrados para ese destino.', 'warning')
+                    else:
+                        flash(f'Aviso enviado. Push enviados: {sent}/{requested}' + (f' · fallidos: {failed}' if failed else ''), 'success' if sent else 'warning')
+                    return redirect(url_for('notificaciones_enviar'))
+                except Exception as exc:
+                    db.rollback()
+                    app.logger.exception('Error enviando aviso desde panel web')
+                    flash(f'No se pudo enviar el aviso: {exc}', 'danger')
+
+        recientes = []
+        if table_exists(db, 'notificaciones_push'):
+            recientes = db.fetchall(
+                """
+                SELECT titulo, mensaje, tipo, target_role, target_group, created_by, created_at
+                FROM notificaciones_push
+                WHERE condominio_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 12
+                """,
+                (condominio_id,),
+            )
+        return render_template('notificaciones_enviar.html', roles=roles, usuarios=usuarios, parcelas=parcelas, recientes=recientes, form=form, push_enabled=firebase_push_enabled())
+
+    @app.get('/api/notificaciones')
+    @api_login_required
+    def api_notificaciones():
+        """Avisos móviles derivados de pagos, actas y salud financiera."""
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        current_month = datetime.now().strftime('%Y-%m')
+        items: list[dict[str, Any]] = []
+
+        if table_exists(db, 'notificaciones_push'):
+            target_filters = ['condominio_id = ?', '(target_role IS NULL OR target_role = ?)']
+            params: list[Any] = [condominio_id, getattr(user, 'role', None)]
+            if column_exists(db, 'notificaciones_push', 'target_user_id'):
+                target_filters.append('(target_user_id IS NULL OR target_user_id = ?)')
+                params.append(int(user.id))
+            if column_exists(db, 'notificaciones_push', 'target_parcela_id'):
+                target_filters.append('(target_parcela_id IS NULL OR target_parcela_id = ?)')
+                params.append(int(user.parcela_id) if getattr(user, 'parcela_id', None) else -1)
+            # Los avisos de grupo (ej. morosos) quedan visibles solo si el usuario ya tiene deuda/pago pendiente.
+            if column_exists(db, 'notificaciones_push', 'target_group'):
+                target_filters.append("(target_group IS NULL OR target_group <> 'morosos' OR ? = 1)")
+                try:
+                    is_moroso = int(user.parcela_id) in get_moroso_parcela_ids(db, condominio_id, current_month) if getattr(user, 'parcela_id', None) else False
+                except Exception:
+                    is_moroso = False
+                params.append(1 if is_moroso else 0)
+            push_rows = db.fetchall(f"""
+                SELECT id, titulo, mensaje, tipo, created_at
+                FROM notificaciones_push
+                WHERE {' AND '.join(target_filters)}
+                ORDER BY created_at DESC, id DESC
+                LIMIT 20
+                """, params)
+            for r in push_rows:
+                items.append({
+                    'id': 'push-' + str(r['id']),
+                    'type': r['tipo'] or 'aviso',
+                    'title': r['titulo'],
+                    'message': r['mensaje'],
+                    'date': str(r['created_at'] or '')[:10],
+                    'urgent': str(r['tipo'] or '') in ('pago_vencido', 'seguridad'),
+                })
+
+        cuota_sql = 'SELECT COALESCE(SUM(cuota_mensual), 0) AS total FROM parcelas WHERE activo = 1 AND condominio_id = ?'
+        cuota_params: list[Any] = [condominio_id]
+        pago_sql = 'SELECT COALESCE(SUM(monto), 0) AS total FROM pagos_parcelas WHERE condominio_id = ? AND mes = ?'
+        pago_params: list[Any] = [condominio_id, current_month]
+        if api_user_should_be_limited_to_own_parcela(user):
+            cuota_sql += ' AND id = ?'
+            cuota_params.append(int(user.parcela_id))
+            pago_sql += ' AND parcela_id = ?'
+            pago_params.append(int(user.parcela_id))
+        cuota = float(((db.fetchone(cuota_sql, cuota_params) or {}).get('total') if hasattr((db.fetchone(cuota_sql, cuota_params) or {}), 'get') else 0) or 0)
+        pago_row = db.fetchone(pago_sql, pago_params)
+        pagado = float((pago_row['total'] if pago_row else 0) or 0)
+        if cuota > 0 and pagado < cuota:
+            items.append({
+                'id': 'pago-' + current_month,
+                'type': 'pago',
+                'title': 'Pago pendiente del mes',
+                'message': 'Hay gastos comunes pendientes por ' + ('$' + f'{(cuota - pagado):,.0f}'.replace(',', '.')) + '.',
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'urgent': True,
+            })
+
+        actas = db.fetchall('SELECT id, titulo, fecha, estado FROM actas WHERE condominio_id = ? ORDER BY fecha DESC, id DESC LIMIT 3', (condominio_id,))
+        for acta in actas:
+            items.append({
+                'id': 'acta-' + str(acta['id']),
+                'type': 'acta',
+                'title': 'Acta disponible: ' + str(acta['titulo']),
+                'message': 'Revisa los acuerdos y responsables registrados.',
+                'date': acta['fecha'],
+                'urgent': False,
+            })
+
+        if getattr(user, 'must_change_password', False):
+            items.insert(0, {
+                'id': 'seguridad-password',
+                'type': 'seguridad',
+                'title': 'Actualiza tu contraseña',
+                'message': 'Por seguridad debes cambiar tu contraseña temporal.',
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'urgent': True,
+            })
+        return api_response({'ok': True, 'items': items, 'count': len(items)})
+
+    @app.get('/api/parcelas/<int:parcela_id>')
+    @api_login_required
+    def api_parcela_detail(parcela_id: int):
+        db = g.api_db
+        user = g.api_user
+        condominio_id = api_get_condominio_id(db, user)
+        if api_user_should_be_limited_to_own_parcela(user):
+            parcela_id = int(user.parcela_id)
+
+        parcela = db.fetchone(
+            'SELECT id, nombre, curso, cuota_mensual, apoderado, telefono, direccion, observacion_ficha, activo, condominio_id FROM parcelas WHERE id = ? AND condominio_id = ?',
+            (parcela_id, condominio_id),
+        )
+        if not parcela:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Parcela no encontrada.'}, 404)
+
+        resumen = db.fetchone(
+            """
+            SELECT
+                COUNT(*) AS total_movimientos,
+                COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE 0 END), 0) AS ingresos_total,
+                COALESCE(SUM(CASE WHEN tipo = 'gasto' THEN monto ELSE 0 END), 0) AS gastos_total,
+                MAX(fecha) AS ultima_fecha
+            FROM movimientos
+            WHERE condominio_id = ? AND parcela_id = ?
+            """,
+            (condominio_id, parcela_id),
+        )
+        rows = db.fetchall(
+            """
+            SELECT m.id, m.fecha, m.tipo, m.concepto, m.monto, m.observacion, m.origen,
+                   COALESCE(a.nombre, '-') AS actividad,
+                   COALESCE(p.nombre, '-') AS parcela
+            FROM movimientos m
+            LEFT JOIN actividades a ON a.id = m.actividad_id
+            LEFT JOIN parcelas p ON p.id = m.parcela_id
+            WHERE m.condominio_id = ? AND m.parcela_id = ?
+            ORDER BY m.fecha DESC, m.id DESC
+            LIMIT 25
+            """,
+            (condominio_id, parcela_id),
+        )
+        items = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item['monto'] = float(item.get('monto') or 0)
+            except Exception:
+                pass
+            items.append(item)
+        return api_response({
+            'ok': True,
+            'parcela': dict(parcela),
+            'summary': {
+                'total_movimientos': int((resumen['total_movimientos'] if resumen else 0) or 0),
+                'ingresos_total': float((resumen['ingresos_total'] if resumen else 0) or 0),
+                'gastos_total': float((resumen['gastos_total'] if resumen else 0) or 0),
+                'saldo_total': float(((resumen['ingresos_total'] if resumen else 0) or 0) - ((resumen['gastos_total'] if resumen else 0) or 0)),
+                'ultima_fecha': (resumen['ultima_fecha'] if resumen else None),
+            },
+            'movimientos': items,
+        })
+
+    @app.put('/api/movimientos/<int:movimiento_id>')
+    @api_login_required
+    def api_update_movimiento(movimiento_id: int):
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_finance', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para editar movimientos.'}, 403)
+
+        condominio_id = api_get_condominio_id(db, user)
+        current_item = db.fetchone('SELECT * FROM movimientos WHERE id = ? AND condominio_id = ?', (movimiento_id, condominio_id))
+        if not current_item:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Movimiento no encontrado.'}, 404)
+
+        payload = request.get_json(silent=True) or {}
+        tipo = str(payload.get('tipo', current_item['tipo']) or current_item['tipo']).strip().lower()
+        concepto = str(payload.get('concepto', payload.get('descripcion', current_item['concepto'])) or current_item['concepto']).strip()
+        observacion = str(payload.get('observacion', current_item['observacion'] or '') or '').strip()
+        fecha = str(payload.get('fecha', current_item['fecha']) or current_item['fecha']).strip()
+        origen = str(payload.get('origen', current_item['origen'] or 'general') or 'general').strip().lower()
+
+        if tipo not in ('ingreso', 'gasto'):
+            return api_response({'ok': False, 'error': 'invalid_tipo', 'message': 'El tipo debe ser ingreso o gasto.'}, 400)
+        if not concepto:
+            return api_response({'ok': False, 'error': 'missing_concepto', 'message': 'Debes indicar un concepto o descripción.'}, 400)
+        try:
+            validar_fecha(fecha)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_fecha', 'message': 'La fecha es inválida. Usa formato YYYY-MM-DD.'}, 400)
+        try:
+            monto = float(payload.get('monto', current_item['monto']) or 0)
+        except Exception:
+            return api_response({'ok': False, 'error': 'invalid_monto', 'message': 'El monto debe ser numérico.'}, 400)
+        if monto <= 0:
+            return api_response({'ok': False, 'error': 'invalid_monto', 'message': 'El monto debe ser mayor a 0.'}, 400)
+
+        actividad_id = payload.get('actividad_id', current_item['actividad_id'])
+        parcela_id = payload.get('parcela_id', current_item['parcela_id'])
+        actividad_id = int(actividad_id) if str(actividad_id or '').isdigit() else None
+        parcela_id = int(parcela_id) if str(parcela_id or '').isdigit() else None
+
+        if api_user_should_be_limited_to_own_parcela(user):
+            parcela_id = int(user.parcela_id)
+        if parcela_id is not None:
+            parcela = db.fetchone('SELECT id, nombre FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id))
+            if not parcela:
+                return api_response({'ok': False, 'error': 'invalid_parcela', 'message': 'La parcela indicada no existe en este condominio.'}, 400)
+        else:
+            parcela = None
+        if actividad_id is not None:
+            actividad = db.fetchone('SELECT id, nombre FROM actividades WHERE id = ? AND condominio_id = ?', (actividad_id, condominio_id))
+            if not actividad:
+                return api_response({'ok': False, 'error': 'invalid_actividad', 'message': 'La actividad indicada no existe en este condominio.'}, 400)
+        else:
+            actividad = None
+
+        db.execute(
+            'UPDATE movimientos SET fecha = ?, tipo = ?, concepto = ?, monto = ?, actividad_id = ?, parcela_id = ?, observacion = ?, origen = ? WHERE id = ? AND condominio_id = ?',
+            (fecha, tipo, concepto, monto, actividad_id, parcela_id, observacion, origen or 'general', movimiento_id, condominio_id),
+        )
+        db.commit()
+        return api_response({
+            'ok': True,
+            'id': movimiento_id,
+            'item': {
+                'id': movimiento_id,
+                'fecha': fecha,
+                'tipo': tipo,
+                'concepto': concepto,
+                'monto': float(monto),
+                'observacion': observacion,
+                'origen': origen or 'general',
+                'actividad': actividad['nombre'] if actividad else '-',
+                'parcela': parcela['nombre'] if parcela else '-',
+            }
+        })
+
+    @app.delete('/api/movimientos/<int:movimiento_id>')
+    @api_login_required
+    def api_delete_movimiento(movimiento_id: int):
+        db = g.api_db
+        user = g.api_user
+        if not getattr(user, 'can_manage_finance', lambda: False)():
+            return api_response({'ok': False, 'error': 'forbidden', 'message': 'No tienes permisos para eliminar movimientos.'}, 403)
+        condominio_id = api_get_condominio_id(db, user)
+        item = db.fetchone('SELECT id, concepto FROM movimientos WHERE id = ? AND condominio_id = ?', (movimiento_id, condominio_id))
+        if not item:
+            return api_response({'ok': False, 'error': 'not_found', 'message': 'Movimiento no encontrado.'}, 404)
+        db.execute('DELETE FROM movimientos WHERE id = ? AND condominio_id = ?', (movimiento_id, condominio_id))
+        db.commit()
+        return api_response({'ok': True, 'deleted_id': movimiento_id, 'message': f"Movimiento '{item['concepto']}' eliminado."})
+
     @app.route('/')
     def index():
         return redirect(url_for('dashboard' if current_user.is_authenticated else 'landing'))
@@ -1047,7 +2621,7 @@ def create_app() -> Flask:
                 flash('Debes asignar un condominio al usuario.', 'danger')
             elif parcela_id and not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
                 flash('La parcela seleccionada no pertenece al condominio del usuario.', 'danger')
-            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ?', (parcela_id,)):
+            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
                 flash('Esa parcela ya está vinculada a otro usuario.', 'danger')
             elif db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=?', (username,)):
                 flash('Ese nombre de usuario ya existe.', 'danger')
@@ -1097,7 +2671,7 @@ def create_app() -> Flask:
                 flash('Debes asignar un condominio al usuario.', 'danger')
             elif parcela_id and not db.fetchone('SELECT 1 FROM parcelas WHERE id = ? AND condominio_id = ?', (parcela_id, condominio_id)):
                 flash('La parcela seleccionada no pertenece al condominio del usuario.', 'danger')
-            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND id <> ?', (parcela_id, user_id)):
+            elif parcela_id and db.fetchone('SELECT 1 FROM usuarios WHERE parcela_id = ? AND condominio_id = ? AND id <> ?', (parcela_id, condominio_id, user_id)):
                 flash('Esa parcela ya está vinculada a otro usuario.', 'danger')
             elif db.fetchone('SELECT 1 FROM usuarios WHERE lower(username)=? AND id<>?', (username, user_id)):
                 flash('Ese nombre de usuario ya existe.', 'danger')
@@ -1127,6 +2701,8 @@ def create_app() -> Flask:
         if not current_user.is_global_admin() and usuario['condominio_id'] != current_user.condominio_id:
             flash('Solo puedes eliminar usuarios de tu propio condominio.', 'danger')
             return redirect(url_for('usuarios_list'))
+        if table_exists(db, 'push_tokens'):
+            db.execute('DELETE FROM push_tokens WHERE user_id=?', (user_id,))
         db.execute('DELETE FROM usuarios WHERE id=?', (user_id,))
         db.commit()
         flash('Usuario eliminado.', 'success')
@@ -2234,12 +3810,13 @@ def get_current_condominio_id(db: DBAdapter) -> int | None:
     try:
         if getattr(current_user, 'is_authenticated', False):
             selected_condominio = request.values.get('condominio_id', '').strip()
-            if getattr(current_user, 'is_global_admin', lambda: False)() and selected_condominio.isdigit():
-                return int(selected_condominio)
+            if getattr(current_user, 'is_global_admin', lambda: False)():
+                return int(selected_condominio) if selected_condominio.isdigit() else get_default_condominio_id(db)
             if getattr(current_user, 'condominio_id', None):
                 return int(current_user.condominio_id)
-            if getattr(current_user, 'role', None) == 'admin' and selected_condominio.isdigit():
-                return int(selected_condominio)
+            # Seguridad: usuarios autenticados sin condominio asignado no heredan
+            # datos del primer condominio.
+            return None
     except Exception:
         pass
     return get_default_condominio_id(db)
@@ -2261,12 +3838,10 @@ def require_same_condominio(db: DBAdapter, table: str, row_id: int) -> bool:
 
 
 def condominio_scope_clause(alias: str, db: DBAdapter) -> tuple[str, list[Any]]:
-    if getattr(current_user, 'is_authenticated', False) and getattr(current_user, 'is_global_admin', lambda: False)():
-        condominio_id = request.args.get('condominio_id', '').strip()
-        if condominio_id.isdigit():
-            return f' AND {alias}.condominio_id = ?', [int(condominio_id)]
-        return '', []
-    return f' AND {alias}.condominio_id = ?', [get_current_condominio_id(db)]
+    condominio_id = get_current_condominio_id(db)
+    if condominio_id is None:
+        return ' AND 1=0', []
+    return f' AND {alias}.condominio_id = ?', [condominio_id]
 
 
 def obtener_movimientos_filtrados(db: DBAdapter, tipo: str = 'Todos', mes: str = '', q: str = '', fecha_desde: str = '', fecha_hasta: str = '', actividad_id: str | int = '', parcela_id: str | int = ''):
@@ -3424,6 +4999,16 @@ def init_db(db: DBAdapter) -> None:
     try:
         db.execute('CREATE TABLE IF NOT EXISTS condominios (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE, direccion TEXT, activo INTEGER NOT NULL DEFAULT 1)' if db.kind == 'sqlite' else 'CREATE TABLE IF NOT EXISTS condominios (id BIGSERIAL PRIMARY KEY, nombre TEXT NOT NULL UNIQUE, direccion TEXT, activo INTEGER NOT NULL DEFAULT 1)')
         db.commit()
+        if db.kind == 'postgres':
+            db.execute('''CREATE TABLE IF NOT EXISTS push_tokens (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, condominio_id BIGINT, token TEXT NOT NULL UNIQUE, platform TEXT, device_name TEXT, activo INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id BIGSERIAL PRIMARY KEY, condominio_id BIGINT, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, target_user_id BIGINT, target_parcela_id BIGINT, target_group TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
+        else:
+            db.execute('''CREATE TABLE IF NOT EXISTS push_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, condominio_id INTEGER, token TEXT NOT NULL UNIQUE, platform TEXT, device_name TEXT, activo INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS notificaciones_push (id INTEGER PRIMARY KEY AUTOINCREMENT, condominio_id INTEGER, titulo TEXT NOT NULL, mensaje TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'aviso', target_role TEXT, target_user_id INTEGER, target_parcela_id INTEGER, target_group TEXT, created_by TEXT, created_at TEXT NOT NULL)''')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_condominio ON push_tokens(condominio_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_notificaciones_push_condominio ON notificaciones_push(condominio_id, created_at)')
+        db.commit()
     except Exception:
         db.rollback()
 
@@ -3450,6 +5035,9 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE actas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE actividades ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE ciclos_cobranza ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
+            'ALTER TABLE notificaciones_push ADD COLUMN IF NOT EXISTS target_user_id BIGINT',
+            'ALTER TABLE notificaciones_push ADD COLUMN IF NOT EXISTS target_parcela_id BIGINT',
+            'ALTER TABLE notificaciones_push ADD COLUMN IF NOT EXISTS target_group TEXT',
         ]
     else:
         migration_statements = [
@@ -3472,6 +5060,9 @@ def init_db(db: DBAdapter) -> None:
             'ALTER TABLE actas ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE actividades ADD COLUMN condominio_id INTEGER',
             'ALTER TABLE ciclos_cobranza ADD COLUMN condominio_id INTEGER',
+            'ALTER TABLE notificaciones_push ADD COLUMN target_user_id INTEGER',
+            'ALTER TABLE notificaciones_push ADD COLUMN target_parcela_id INTEGER',
+            'ALTER TABLE notificaciones_push ADD COLUMN target_group TEXT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
             'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS parcela_id BIGINT',
             'ALTER TABLE parcelas ADD COLUMN IF NOT EXISTS condominio_id BIGINT',
